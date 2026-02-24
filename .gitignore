@@ -28,3 +28,9 @@ target/
 
 # Test artifacts
 test-output/
+
+# Transient documentation (stored in ../scratchpad/ instead)
+IMPROVEMENT-*.md
+IMPROVEMENTS-*.md
+PHASE-*.md
+HASH-*.md

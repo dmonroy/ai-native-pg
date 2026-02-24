@@ -235,6 +235,7 @@ static void wordpiece_tokenize(const char* text, int64_t* token_ids, size_t* tok
     int word_pos = 0;
     size_t output_pos = 0;
     const char* p = text;
+    bool word_truncated = false;  /* Track if any word was truncated */
 
     if (!g_vocab_loaded) {
         load_vocabulary();
@@ -272,7 +273,16 @@ static void wordpiece_tokenize(const char* text, int64_t* token_ids, size_t* tok
                             prefix_len = 2;
                         }
 
-                        /* Copy subword */
+                        /* Copy subword with bounds checking */
+                        int total_len = prefix_len + subword_len;
+                        if (total_len >= 255) {
+                            /* Subword too long - truncate to fit buffer */
+                            subword_len = 255 - prefix_len - 1;
+                            if (!word_truncated) {
+                                word_truncated = true;
+                                elog(WARNING, "ai extension: Subword exceeds buffer size and was truncated");
+                            }
+                        }
                         memcpy(subword + prefix_len, word + w_start, subword_len);
                         subword[prefix_len + subword_len] = '\0';
 
@@ -322,6 +332,13 @@ static void wordpiece_tokenize(const char* text, int64_t* token_ids, size_t* tok
         /* Accumulate word characters (lowercase) */
         if (word_pos < 255) {
             word[word_pos++] = to_lower(c);
+        } else {
+            /* Buffer full - silently skip remaining characters of this word */
+            /* Mark truncation for warning after tokenization completes */
+            if (!word_truncated) {
+                word_truncated = true;
+                elog(WARNING, "ai extension: Word exceeds 255 characters and was truncated during tokenization");
+            }
         }
         p++;
     }
