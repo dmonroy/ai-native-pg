@@ -1,38 +1,45 @@
-# AI-Native Postgres - Proof of Concept
+# AI-Native Postgres - C Extension
 
-**Status:** Experimental PoC
-**Goal:** Prove that IMMUTABLE embedding functions with generated columns work
+**Status:** Working Implementation
+**Goal:** Provide IMMUTABLE embedding functions with generated columns support
 
-## What This PoC Demonstrates
+## What This Extension Provides
 
 1. ✅ Loading ONNX model at `_PG_init()` (once per backend)
 2. ✅ IMMUTABLE function (enables generated columns)
 3. ✅ Lazy loading (model loaded on first use)
-4. ⚠️ Tokenization (placeholder - needs proper BERT tokenizer)
-5. ⚠️ ONNX inference (skeleton - needs implementation)
+4. ✅ BERT WordPiece tokenization (full implementation)
+5. ✅ ONNX Runtime inference (complete)
+6. ✅ Input validation and security checks
+7. ✅ Comprehensive test suite (15 tests)
 
 ## Quick Start
 
 ```bash
+# Build and test (runs full test suite)
+./build-and-test.sh
+
+# Or manually:
+
 # Build image
-docker build -t ai-postgres:poc .
+docker build -t ai-postgres:latest .
 
 # Run container
 docker run -d \
-  --name ai-postgres-poc \
+  --name ai-postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ai-postgres:poc
+  ai-postgres:latest
 
 # Connect
 psql -h localhost -U postgres
 
 # Test extension
 SELECT ai.health_check();
-SELECT ai.version();
 
-# This will fail with "not yet implemented" (expected for PoC skeleton)
-SELECT ai.embed('Hello world');
+# Generate embeddings
+SELECT vector_dims(ai.embed('Hello world'));  -- Returns: 384
+SELECT ai.embed('PostgreSQL') <=> ai.embed('database');  -- Cosine distance
 ```
 
 ## Architecture
@@ -40,52 +47,69 @@ SELECT ai.embed('Hello world');
 ```
 PostgreSQL 18
 ├─ pgvector (vector type, HNSW indexes)
-├─ ONNX Runtime 1.18.0 (CPU only)
+├─ ONNX Runtime 1.24.2 (CPU only)
 └─ ai extension
    ├─ ai.c (C implementation)
    ├─ ai--1.0.sql (SQL definitions)
    └─ Model: bge-small-en-v1.5 (384-dim, ~64MB)
 ```
 
+## Build Configuration
+
+All versions are parameterized as Docker build arguments (see BUILD.md):
+
+```bash
+docker build \
+  --build-arg PG_MAJOR=18 \
+  --build-arg ONNX_VERSION=1.24.2 \
+  -t ai-postgres:latest .
+```
+
 ## Directory Structure
 
 ```
-ai-native-pg/
+ai-native-pg-c/
 ├── Dockerfile              # Container definition
-├── init.sql                # Auto-run on container start
+├── BUILD.md               # Build configuration docs
 ├── README.md              # This file
+├── build-and-test.sh      # Build and test automation
 ├── ai_extension/
 │   ├── Makefile           # Build configuration
 │   ├── ai.control         # Extension metadata
 │   ├── ai--1.0.sql        # SQL function definitions
 │   └── ai.c               # C implementation
-└── test.sql               # Test queries
+└── tests/
+    ├── README.md          # Test documentation
+    └── sql/               # SQL test files (15 tests)
 ```
 
 ## Current Status
 
 ### ✅ Implemented
 - [x] Dockerfile with Postgres 18 + pgvector + ONNX Runtime
-- [x] C extension skeleton
+- [x] C extension with full functionality
 - [x] Lazy loading architecture
 - [x] Health check function
-- [x] Input validation
+- [x] Input validation and security
+  - UTF-8 validation
+  - Null byte detection
+  - Path traversal protection
+  - File access validation
+- [x] BERT WordPiece tokenization
+- [x] ONNX Runtime inference
+- [x] Vector conversion (float[] → pgvector format)
+- [x] Generated column support (IMMUTABLE function)
+- [x] Comprehensive test suite (15 tests)
 
-### ⚠️ Placeholder
-- [ ] Tokenization (needs proper BERT WordPiece tokenizer)
-- [ ] ONNX inference (skeleton only)
-- [ ] Vector conversion (float[] → pgvector format)
+### 📝 TODO (Future Enhancements)
+1. Support multiple embedding models
+2. Add batching for multiple embeddings
+3. GPU support via ONNX Runtime
+4. Model registry for dynamic loading
+5. Performance optimizations
+6. Production error handling improvements
 
-### 📝 TODO (Next Steps)
-1. Implement proper BERT tokenizer
-2. Implement ONNX inference
-3. Convert embeddings to pgvector format
-4. Test with generated columns
-5. Benchmark performance
-
-## Testing Generated Columns
-
-Once inference is implemented:
+## Using Generated Columns
 
 ```sql
 -- Create table with generated embedding column
@@ -126,23 +150,31 @@ With 10 connections:
 Use PgBouncer for connection pooling in production!
 ```
 
-## Known Limitations (PoC)
+## Known Limitations
 
 1. **Single model only** (bge-small-en-v1.5)
-2. **Placeholder tokenizer** (not production-ready)
-3. **No proper error handling** (minimal for PoC)
-4. **No batching** (one embedding at a time)
-5. **CPU only** (no GPU support)
-6. **No model registry** (hardcoded model path)
+2. **No batching** (one embedding at a time)
+3. **CPU only** (no GPU support)
+4. **No model registry** (hardcoded model path)
+5. **Memory per backend** (~64MB when model is loaded)
 
-## Next Steps After PoC
+## Testing
 
-1. **Phase 1:** Complete ONNX inference
-2. **Phase 2:** Add proper BERT tokenizer
-3. **Phase 3:** Test generated columns at scale
-4. **Phase 4:** Add multiple models
-5. **Phase 5:** Build model registry
-6. **Phase 6:** Optimize performance (batching, etc.)
+Run the comprehensive test suite:
+
+```bash
+./build-and-test.sh
+```
+
+This runs 15 SQL-based tests covering:
+- Extension installation
+- Basic embedding operations
+- NULL and edge case handling
+- Semantic similarity
+- Query and search operations
+- Input validation
+- Concurrent operations
+- Real-world scenarios
 
 ## References
 
