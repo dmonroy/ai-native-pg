@@ -1,0 +1,6 @@
+# AI extension control file
+comment = 'AI-native primitives for PostgreSQL with local embedding models'
+default_version = '1.0'
+relocatable = false
+requires = 'vector'
+superuser = false
