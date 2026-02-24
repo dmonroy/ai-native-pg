@@ -1,0 +1,30 @@
+# Build artifacts
+*.o
+*.so
+*.a
+*.bc
+*.dylib
+
+# Log files
+*.log
+
+# Docker artifacts
+.dockerignore
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build directories
+build/
+target/
+
+# Test artifacts
+test-output/
