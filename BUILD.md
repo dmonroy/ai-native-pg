@@ -6,7 +6,7 @@ All version numbers in the Dockerfile are configurable via build arguments.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `PG_MAJOR` | `16` | PostgreSQL major version |
+| `PG_MAJOR` | `18` | PostgreSQL major version |
 | `ONNX_VERSION` | `1.24.2` | ONNX Runtime version |
 | `EXTENSION_VERSION` | `1.0` | Extension SQL schema version |
 
@@ -18,12 +18,12 @@ docker build -t ai-postgres:latest .
 
 ## Building with Custom Versions
 
-### PostgreSQL 17
+### PostgreSQL 16 (Older Version)
 
 ```bash
 docker build \
-  --build-arg PG_MAJOR=17 \
-  -t ai-postgres:pg17 \
+  --build-arg PG_MAJOR=16 \
+  -t ai-postgres:pg16 \
   .
 ```
 
@@ -66,7 +66,7 @@ services:
     build:
       context: .
       args:
-        PG_MAJOR: 16
+        PG_MAJOR: 18
         ONNX_VERSION: 1.24.2
         EXTENSION_VERSION: 1.0
     ports:
@@ -113,8 +113,8 @@ build:
 
 | PostgreSQL | ONNX Runtime | Status |
 |------------|--------------|--------|
+| 18 | 1.24.2 | ✅ Default |
 | 16 | 1.24.2 | ✅ Tested |
-| 16 | 1.23.0 | ⚠️ Untested |
 | 17 | 1.24.2 | ⚠️ Untested |
 
 ### Notes
@@ -170,21 +170,21 @@ docker build -t ai-postgres:dev .
 ```bash
 # Pin specific versions, no cache for security
 docker build --no-cache \
-  --build-arg PG_MAJOR=16 \
+  --build-arg PG_MAJOR=18 \
   --build-arg ONNX_VERSION=1.24.2 \
   --build-arg EXTENSION_VERSION=1.0 \
   -t ai-postgres:prod \
   .
 ```
 
-### Testing New PostgreSQL Version
+### Testing Older PostgreSQL Version
 
 ```bash
-# Test with PostgreSQL 17 (when available)
+# Test with PostgreSQL 16 (stable)
 docker build \
-  --build-arg PG_MAJOR=17 \
-  -t ai-postgres:pg17-test \
+  --build-arg PG_MAJOR=16 \
+  -t ai-postgres:pg16-test \
   . && \
-docker run --rm -e POSTGRES_PASSWORD=test ai-postgres:pg17-test \
+docker run --rm -e POSTGRES_PASSWORD=test ai-postgres:pg16-test \
   psql -U postgres -c "SELECT version();"
 ```

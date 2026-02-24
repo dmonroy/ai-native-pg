@@ -2,7 +2,7 @@
 # Multistage build for cleaner image
 
 # Build arguments for version control
-ARG PG_MAJOR=16
+ARG PG_MAJOR=18
 ARG ONNX_VERSION=1.24.2
 ARG EXTENSION_VERSION=1.0
 
@@ -12,7 +12,7 @@ ARG EXTENSION_VERSION=1.0
 FROM postgres:${PG_MAJOR} AS builder
 
 # Re-declare build args for builder stage
-ARG PG_MAJOR=16
+ARG PG_MAJOR=18
 ARG ONNX_VERSION=1.24.2
 
 # Install build dependencies
@@ -54,7 +54,7 @@ RUN cd /build/ai_extension && make && make install
 FROM postgres:${PG_MAJOR}
 
 # Re-declare build args for runtime stage
-ARG PG_MAJOR=16
+ARG PG_MAJOR=18
 ARG EXTENSION_VERSION=1.0
 
 # Install runtime dependencies
