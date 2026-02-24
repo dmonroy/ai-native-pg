@@ -21,6 +21,7 @@ CONTAINER_NAME="ai-postgres-test"
 TEST_DB="postgres"
 TEST_USER="postgres"
 TEST_PASSWORD="postgres"
+TEST_PORT="5434"  # Changed from 5433 to avoid conflicts
 
 # Cleanup function
 cleanup() {
@@ -46,7 +47,7 @@ echo -e "${YELLOW}Step 2: Starting PostgreSQL container...${NC}"
 docker run -d \
     --name $CONTAINER_NAME \
     -e POSTGRES_PASSWORD=$TEST_PASSWORD \
-    -p 5433:5432 \
+    -p $TEST_PORT:5432 \
     $IMAGE_NAME
 
 # Wait for PostgreSQL to be ready
@@ -85,7 +86,7 @@ echo ""
 echo -e "${YELLOW}Test 3: Basic embedding (triggers vocabulary load)${NC}"
 START_TIME=$(date +%s%3N)
 docker exec $CONTAINER_NAME psql -U postgres -c \
-    "SELECT array_length((ai.embed('Hello world')::text)::float[], 1) as dims;" || {
+    "SELECT vector_dims(ai.embed('Hello world')) as dims;" || {
     echo -e "${RED}✗ Basic embedding failed${NC}"
     exit 1
 }
@@ -122,7 +123,7 @@ docker exec $CONTAINER_NAME psql -U postgres -c \
 
 echo "  - Long text (should work):"
 docker exec $CONTAINER_NAME psql -U postgres -c \
-    "SELECT array_length((ai.embed(repeat('test ', 100))::text)::float[], 1) as dims;" > /dev/null 2>&1 && \
+    "SELECT vector_dims(ai.embed(repeat('test ', 100))) as dims;" > /dev/null 2>&1 && \
     echo -e "    ${GREEN}✓ Long text handled${NC}" || \
     echo -e "    ${RED}✗ Long text failed${NC}"
 echo ""
@@ -154,7 +155,7 @@ INSERT INTO test_docs (content) VALUES
     ('Machine learning in databases'),
     ('Vector similarity search');
 
-SELECT id, content, array_length(embedding::float[], 1) as dims
+SELECT id, content, vector_dims(embedding) as dims
 FROM test_docs;
 
 DROP TABLE test_docs;
@@ -202,9 +203,9 @@ echo -e "Model: bge-small-en-v1.5 (384-dim)"
 echo -e ""
 echo -e "${GREEN}✓ All tests completed successfully!${NC}"
 echo -e ""
-echo -e "${YELLOW}Container still running on port 5433${NC}"
+echo -e "${YELLOW}Container still running on port $TEST_PORT${NC}"
 echo -e "Connect with: ${GREEN}docker exec -it $CONTAINER_NAME psql -U postgres${NC}"
-echo -e "Or: ${GREEN}psql -h localhost -p 5433 -U postgres${NC}"
+echo -e "Or: ${GREEN}psql -h localhost -p $TEST_PORT -U postgres${NC}"
 echo -e "Stop with: ${GREEN}docker stop $CONTAINER_NAME${NC}"
 echo ""
 
