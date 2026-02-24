@@ -9,7 +9,7 @@ CREATE TEMP TABLE articles (
     content TEXT NOT NULL,
     category TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
-    embedding vector(384)
+    embedding vector(768)
 );
 
 -- Insert sample articles

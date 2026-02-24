@@ -12,7 +12,7 @@ LIMIT 1;
 CREATE TEMP TABLE test_generated (
     id SERIAL PRIMARY KEY,
     content TEXT,
-    embedding vector(384) GENERATED ALWAYS AS (ai.embed(content)) STORED
+    embedding vector(768) GENERATED ALWAYS AS (ai.embed(content)) STORED
 );
 
 -- Insert test data
@@ -29,7 +29,7 @@ WHERE embedding IS NOT NULL;
 -- Verify all have correct dimensions
 SELECT COUNT(*) = 3 AS all_correct_dimensions
 FROM test_generated
-WHERE vector_dims(embedding) = 384;
+WHERE vector_dims(embedding) = 768;
 
 -- Can use in indexes (IMMUTABLE required)
 CREATE INDEX test_idx ON test_generated USING ivfflat (embedding vector_cosine_ops);

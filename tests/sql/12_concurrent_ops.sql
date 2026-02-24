@@ -24,7 +24,7 @@ FROM concurrent;
 CREATE TEMP TABLE batch_test (
     id SERIAL PRIMARY KEY,
     text TEXT,
-    embedding vector(384)
+    embedding vector(768)
 );
 
 INSERT INTO batch_test (text, embedding)
@@ -37,8 +37,8 @@ SELECT COUNT(*) = 20 AS batch_insert_works
 FROM batch_test WHERE embedding IS NOT NULL;
 
 -- Multiple table operations work
-CREATE TEMP TABLE table1 (embedding vector(384));
-CREATE TEMP TABLE table2 (embedding vector(384));
+CREATE TEMP TABLE table1 (embedding vector(768));
+CREATE TEMP TABLE table2 (embedding vector(768));
 
 INSERT INTO table1 SELECT ai.embed('table1 data');
 INSERT INTO table2 SELECT ai.embed('table2 data');

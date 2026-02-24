@@ -5,7 +5,7 @@
  * Model loaded once at _PG_init() into process-private memory
  *
  * Key design decisions:
- * - Single model (bge-small-en-v1.5) for PoC
+ * - Single model (nomic-embed-text-v1.5) for PoC
  * - Lazy loading (load on first use, not at _PG_init)
  * - IMMUTABLE function (enables generated columns)
  * - CPU inference only (deterministic)
@@ -37,10 +37,10 @@ static bool g_initialized = false;
 static bool g_model_loaded = false;
 
 /* Model configuration */
-#define MODEL_DIMS 384
+#define MODEL_DIMS 768
 #define MAX_INPUT_LENGTH 8192
 #define MAX_VOCAB_SIZE 50000
-#define MAX_SEQ_LENGTH 512
+#define MAX_SEQ_LENGTH 8192
 
 /* Vocabulary hash table entry */
 typedef struct {
@@ -97,7 +97,7 @@ static void load_vocabulary(void) {
         models_path = "/models";
     }
 
-    snprintf(vocab_path, sizeof(vocab_path), "%s/vocab.txt", models_path);
+    snprintf(vocab_path, sizeof(vocab_path), "%s/nomic-embed-text-v1.5/vocab.txt", models_path);
 
     /* Validate vocabulary path for security (improvement #12) */
     if (strstr(vocab_path, "..") != NULL) {
@@ -458,7 +458,7 @@ static void load_model(void) {
         elog(ERROR, "ai extension: ONNX Runtime not initialized");
     }
 
-    elog(INFO, "ai extension: Loading bge-small-en-v1.5 model (PID %d)...", getpid());
+    elog(INFO, "ai extension: Loading nomic-embed-text-v1.5 model (PID %d)...", getpid());
 
     /* Get model path from environment or use default */
     models_path = getenv("AI_MODELS_PATH");
@@ -466,7 +466,7 @@ static void load_model(void) {
         models_path = "/models";
     }
 
-    snprintf(model_path, sizeof(model_path), "%s/bge-small-en-v1.5.onnx", models_path);
+    snprintf(model_path, sizeof(model_path), "%s/nomic-embed-text-v1.5/model_int8.onnx", models_path);
 
     /* Validate model path for security (improvement #12) */
     if (strstr(model_path, "..") != NULL) {
@@ -484,7 +484,7 @@ static void load_model(void) {
              model_path, saved_errno);
     }
 
-    /* Check file size (should be ~64MB for bge-small) */
+    /* Check file size (should be ~137MB for nomic-embed INT8) */
     struct stat st;
     if (stat(model_path, &st) == 0) {
         if (st.st_size < 1024 * 1024) {
@@ -540,16 +540,17 @@ static void load_model(void) {
         size_t num_inputs = 0, num_outputs = 0;
         g_ort->SessionGetInputCount(g_ort_session, &num_inputs);
         g_ort->SessionGetOutputCount(g_ort_session, &num_outputs);
-        elog(INFO, "ai extension: Model loaded successfully (~64MB, %zu inputs, %zu outputs)", num_inputs, num_outputs);
+        elog(INFO, "ai extension: Model loaded successfully (~137MB INT8, %zu inputs, %zu outputs)", num_inputs, num_outputs);
 
         /* Log input/output names */
         OrtAllocator* allocator;
         g_ort->GetAllocatorWithDefaultOptions(&allocator);
+        elog(INFO, "ai extension: === Model Input/Output Info ===");
         for (size_t i = 0; i < num_inputs && i < 5; i++) {
             char* name;
             status = g_ort->SessionGetInputName(g_ort_session, i, allocator, &name);
             if (status == NULL) {
-                elog(INFO, "  Input %zu: %s", i, name);
+                elog(INFO, "ai extension:   Input %zu: %s", i, name);
                 allocator->Free(allocator, name);
             }
         }
@@ -557,7 +558,7 @@ static void load_model(void) {
             char* name;
             status = g_ort->SessionGetOutputName(g_ort_session, i, allocator, &name);
             if (status == NULL) {
-                elog(INFO, "  Output %zu: %s", i, name);
+                elog(INFO, "ai extension:   Output %zu: %s", i, name);
                 allocator->Free(allocator, name);
             }
         }
@@ -595,11 +596,13 @@ Datum ai_embed(PG_FUNCTION_ARGS) {
     OrtMemoryInfo* memory_info = NULL;
     OrtValue* input_ids_tensor = NULL;
     OrtValue* attention_mask_tensor = NULL;
+    OrtValue* token_type_ids_tensor = NULL;
     OrtValue* output_tensor = NULL;
     float* output_data;
     Vector* result = NULL;
     int64_t* token_ids = NULL;
     int64_t* attention_mask = NULL;
+    int64_t* token_type_ids = NULL;
     size_t token_count;
     int64_t input_shape[2];
     size_t input_size;
@@ -700,19 +703,33 @@ Datum ai_embed(PG_FUNCTION_ARGS) {
             ereport(ERROR, (errmsg("Failed to create attention_mask tensor: %s", msg)));
         }
 
-        /* Release memory_info immediately after use */
+        /* Create token_type_ids tensor (all zeros for single sentence) */
+        token_type_ids = (int64_t*)palloc(MAX_SEQ_LENGTH * sizeof(int64_t));
+        memset(token_type_ids, 0, token_count * sizeof(int64_t));
+
+        status = g_ort->CreateTensorWithDataAsOrtValue(
+            memory_info, token_type_ids, input_size,
+            input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+            &token_type_ids_tensor);
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            g_ort->ReleaseStatus(status);
+            ereport(ERROR, (errmsg("Failed to create token_type_ids tensor: %s", msg)));
+        }
+
+        /* Release memory_info after all tensors created */
         g_ort->ReleaseMemoryInfo(memory_info);
         memory_info = NULL;
 
-        /* Run inference (only 2 inputs needed for this model) */
-        const char* input_names[] = {"input_ids", "attention_mask"};
-        const char* output_names[] = {"sentence_embedding"};
-        OrtValue* input_tensors[] = {input_ids_tensor, attention_mask_tensor};
+        /* Run inference (3 inputs for nomic-embed) */
+        const char* input_names[] = {"input_ids", "token_type_ids", "attention_mask"};
+        const char* output_names[] = {"last_hidden_state"};
+        OrtValue* input_tensors[] = {input_ids_tensor, token_type_ids_tensor, attention_mask_tensor};
 
         status = g_ort->Run(
             g_ort_session,
             NULL,  /* run options */
-            input_names, (const OrtValue* const*)input_tensors, 2,
+            input_names, (const OrtValue* const*)input_tensors, 3,
             output_names, 1,
             &output_tensor);
 
@@ -731,9 +748,39 @@ Datum ai_embed(PG_FUNCTION_ARGS) {
             ereport(ERROR, (errmsg("Failed to get tensor data: %s", msg)));
         }
 
-        /* Extract sentence embedding (already pooled and normalized by model) */
+        /* Mean pooling: average token embeddings weighted by attention mask
+         * Output shape: [1, token_count, 768]
+         * Need to pool across sequence dimension to get [1, 768]
+         */
+        float pooled[MODEL_DIMS];
+        memset(pooled, 0, MODEL_DIMS * sizeof(float));
+
+        int mask_sum = 0;
+        for (size_t i = 0; i < token_count; i++) {
+            if (attention_mask[i] == 1) {
+                mask_sum++;
+                for (int j = 0; j < MODEL_DIMS; j++) {
+                    pooled[j] += output_data[i * MODEL_DIMS + j];
+                }
+            }
+        }
+
+        /* Average by mask sum */
+        for (int j = 0; j < MODEL_DIMS; j++) {
+            pooled[j] /= (float)mask_sum;
+        }
+
+        /* L2 normalization */
+        float norm = 0.0f;
+        for (int j = 0; j < MODEL_DIMS; j++) {
+            norm += pooled[j] * pooled[j];
+        }
+        norm = sqrtf(norm);
+
         result = create_vector(MODEL_DIMS);
-        memcpy(result->x, output_data, MODEL_DIMS * sizeof(float));
+        for (int j = 0; j < MODEL_DIMS; j++) {
+            result->x[j] = pooled[j] / norm;
+        }
         SET_VARSIZE(result, VECTOR_SIZE(MODEL_DIMS));
     }
     PG_FINALLY();
@@ -744,6 +791,9 @@ Datum ai_embed(PG_FUNCTION_ARGS) {
         }
         if (attention_mask_tensor) {
             g_ort->ReleaseValue(attention_mask_tensor);
+        }
+        if (token_type_ids_tensor) {
+            g_ort->ReleaseValue(token_type_ids_tensor);
         }
         if (input_ids_tensor) {
             g_ort->ReleaseValue(input_ids_tensor);
@@ -756,6 +806,9 @@ Datum ai_embed(PG_FUNCTION_ARGS) {
         }
         if (attention_mask) {
             pfree(attention_mask);
+        }
+        if (token_type_ids) {
+            pfree(token_type_ids);
         }
     }
     PG_END_TRY();
@@ -777,7 +830,7 @@ Datum ai_health_check(PG_FUNCTION_ARGS) {
     appendStringInfo(&buf, "Model loaded: %s\n", g_model_loaded ? "YES" : "NO");
 
     if (g_model_loaded) {
-        appendStringInfo(&buf, "Model: bge-small-en-v1.5 (384-dim)\n");
+        appendStringInfo(&buf, "Model: nomic-embed-text-v1.5 (768-dim, INT8)\n");
         appendStringInfo(&buf, "Status: Ready\n");
     } else {
         appendStringInfo(&buf, "Status: Model will be loaded on first ai.embed() call\n");

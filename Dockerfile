@@ -73,13 +73,15 @@ COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/ai.so /usr/lib/postgresq
 COPY --from=builder /usr/share/postgresql/${PG_MAJOR}/extension/ai.control /usr/share/postgresql/${PG_MAJOR}/extension/
 COPY --from=builder /usr/share/postgresql/${PG_MAJOR}/extension/ai--${EXTENSION_VERSION}.sql /usr/share/postgresql/${PG_MAJOR}/extension/
 
-# Download model and vocabulary
-RUN mkdir -p /models && \
-    cd /models && \
-    wget -O bge-small-en-v1.5.onnx \
-    https://huggingface.co/Teradata/bge-small-en-v1.5/resolve/main/onnx/model.onnx && \
-    wget -O vocab.txt \
-    https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/vocab.txt
+# Download model and tokenizer files
+RUN mkdir -p /models/nomic-embed-text-v1.5 && \
+    cd /models/nomic-embed-text-v1.5 && \
+    wget -q https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/onnx/model_int8.onnx && \
+    wget -q https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json && \
+    wget -q https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/vocab.txt && \
+    wget -q https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/config.json && \
+    wget -q https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer_config.json && \
+    wget -q https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/special_tokens_map.json
 
 ENV AI_MODELS_PATH=/models
 

@@ -12,8 +12,8 @@ SELECT proname FROM pg_proc WHERE proname = 'health_check';
 -- Health check returns text
 SELECT ai.health_check() LIKE '%ONNX%' AS health_check_ok;
 
--- Embed returns 384-dim vector
-SELECT vector_dims(ai.embed('Hello world')) = 384 AS correct_dimensions;
+-- Embed returns 768-dim vector
+SELECT vector_dims(ai.embed('Hello world')) = 768 AS correct_dimensions;
 
 -- NULL input returns NULL
 SELECT ai.embed(NULL) IS NULL AS null_handling_ok;

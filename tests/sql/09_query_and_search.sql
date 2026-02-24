@@ -6,7 +6,7 @@
 CREATE TEMP TABLE documents (
     id SERIAL PRIMARY KEY,
     title TEXT,
-    embedding vector(384)
+    embedding vector(768)
 );
 
 -- Insert test documents

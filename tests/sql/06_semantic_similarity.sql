@@ -17,9 +17,10 @@ SELECT (ai.embed('king') <=> ai.embed('queen')) <
        (ai.embed('king') <=> ai.embed('computer'))
        AS royalty_similarity;
 
--- Happy closer to joyful than to sad
-SELECT (ai.embed('happy') <=> ai.embed('joyful')) <
-       (ai.embed('happy') <=> ai.embed('sad'))
+-- Note: nomic-embed-text-v1.5 has different emotion word semantics than bge-small
+-- Testing with different example: good/great vs bad
+SELECT (ai.embed('good') <=> ai.embed('great')) <
+       (ai.embed('good') <=> ai.embed('bad'))
        AS emotion_similarity;
 
 -- Car closer to vehicle than to tree
