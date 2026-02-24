@@ -507,20 +507,27 @@ static void load_model(void) {
 
 /*
  * Main embedding function
+ * Uses PG_TRY/CATCH for comprehensive resource cleanup
+ * Addresses improvement #3: prevents ONNX tensor leaks on errors
+ * Also fixes improvement #5: moves arrays from stack to heap
  */
 PG_FUNCTION_INFO_V1(ai_embed);
 Datum ai_embed(PG_FUNCTION_ARGS) {
     text* input_text;
     char* text_str;
     size_t text_len;
-    OrtStatus* status;
-    OrtMemoryInfo* memory_info;
+    OrtStatus* status = NULL;
+    OrtMemoryInfo* memory_info = NULL;
     OrtValue* input_ids_tensor = NULL;
     OrtValue* attention_mask_tensor = NULL;
-    OrtValue* token_type_ids_tensor = NULL;
     OrtValue* output_tensor = NULL;
     float* output_data;
-    Vector* result;
+    Vector* result = NULL;
+    int64_t* token_ids = NULL;
+    int64_t* attention_mask = NULL;
+    size_t token_count;
+    int64_t input_shape[2];
+    size_t input_size;
 
     /* Check for NULL input */
     if (PG_ARGISNULL(0)) {
@@ -553,110 +560,115 @@ Datum ai_embed(PG_FUNCTION_ARGS) {
     /* Convert to C string */
     text_str = text_to_cstring(input_text);
 
-    /* Tokenize input using BERT WordPiece tokenizer */
-    int64_t token_ids[MAX_SEQ_LENGTH];
-    int64_t attention_mask[MAX_SEQ_LENGTH];
-    int64_t token_type_ids[MAX_SEQ_LENGTH];
-    size_t token_count;
-    wordpiece_tokenize(text_str, token_ids, &token_count);
+    /* Allocate arrays on heap to avoid stack overflow (improvement #5) */
+    token_ids = (int64_t*)palloc(MAX_SEQ_LENGTH * sizeof(int64_t));
+    attention_mask = (int64_t*)palloc(MAX_SEQ_LENGTH * sizeof(int64_t));
 
-    /* Create attention mask and token type IDs */
-    for (size_t i = 0; i < token_count; i++) {
-        attention_mask[i] = 1;
-        token_type_ids[i] = 0;
-    }
+    /* Use PG_TRY for comprehensive cleanup on errors */
+    PG_TRY();
+    {
+        /* Tokenize input using BERT WordPiece tokenizer */
+        wordpiece_tokenize(text_str, token_ids, &token_count);
 
-    /* Create ONNX tensors */
-    status = g_ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        g_ort->ReleaseStatus(status);
-        ereport(ERROR, (errmsg("Failed to create memory info: %s", msg)));
-    }
+        /* Create attention mask */
+        for (size_t i = 0; i < token_count; i++) {
+            attention_mask[i] = 1;
+        }
 
-    int64_t input_shape[2] = {1, (int64_t)token_count};
-    size_t input_size = token_count * sizeof(int64_t);
+        /* Create ONNX tensors */
+        status = g_ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            g_ort->ReleaseStatus(status);
+            ereport(ERROR, (errmsg("Failed to create memory info: %s", msg)));
+        }
 
-    /* Create input_ids tensor */
-    status = g_ort->CreateTensorWithDataAsOrtValue(
-        memory_info, token_ids, input_size,
-        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-        &input_ids_tensor);
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        g_ort->ReleaseStatus(status);
+        input_shape[0] = 1;
+        input_shape[1] = (int64_t)token_count;
+        input_size = token_count * sizeof(int64_t);
+
+        /* Create input_ids tensor */
+        status = g_ort->CreateTensorWithDataAsOrtValue(
+            memory_info, token_ids, input_size,
+            input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+            &input_ids_tensor);
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            g_ort->ReleaseStatus(status);
+            ereport(ERROR, (errmsg("Failed to create input_ids tensor: %s", msg)));
+        }
+
+        /* Create attention_mask tensor */
+        status = g_ort->CreateTensorWithDataAsOrtValue(
+            memory_info, attention_mask, input_size,
+            input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+            &attention_mask_tensor);
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            g_ort->ReleaseStatus(status);
+            ereport(ERROR, (errmsg("Failed to create attention_mask tensor: %s", msg)));
+        }
+
+        /* Release memory_info immediately after use */
         g_ort->ReleaseMemoryInfo(memory_info);
-        ereport(ERROR, (errmsg("Failed to create input_ids tensor: %s", msg)));
+        memory_info = NULL;
+
+        /* Run inference (only 2 inputs needed for this model) */
+        const char* input_names[] = {"input_ids", "attention_mask"};
+        const char* output_names[] = {"sentence_embedding"};
+        OrtValue* input_tensors[] = {input_ids_tensor, attention_mask_tensor};
+
+        status = g_ort->Run(
+            g_ort_session,
+            NULL,  /* run options */
+            input_names, (const OrtValue* const*)input_tensors, 2,
+            output_names, 1,
+            &output_tensor);
+
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            char* error_copy = pstrdup(msg);
+            g_ort->ReleaseStatus(status);
+            ereport(ERROR, (errmsg("Failed to run inference: %s", error_copy)));
+        }
+
+        /* Extract output tensor data */
+        status = g_ort->GetTensorMutableData(output_tensor, (void**)&output_data);
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            g_ort->ReleaseStatus(status);
+            ereport(ERROR, (errmsg("Failed to get tensor data: %s", msg)));
+        }
+
+        /* Extract sentence embedding (already pooled and normalized by model) */
+        result = create_vector(MODEL_DIMS);
+        memcpy(result->x, output_data, MODEL_DIMS * sizeof(float));
+        SET_VARSIZE(result, VECTOR_SIZE(MODEL_DIMS));
     }
-
-    /* Create attention_mask tensor */
-    status = g_ort->CreateTensorWithDataAsOrtValue(
-        memory_info, attention_mask, input_size,
-        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-        &attention_mask_tensor);
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        g_ort->ReleaseStatus(status);
-        g_ort->ReleaseValue(input_ids_tensor);
-        g_ort->ReleaseMemoryInfo(memory_info);
-        ereport(ERROR, (errmsg("Failed to create attention_mask tensor: %s", msg)));
+    PG_FINALLY();
+    {
+        /* Always clean up resources, success or failure */
+        if (output_tensor) {
+            g_ort->ReleaseValue(output_tensor);
+        }
+        if (attention_mask_tensor) {
+            g_ort->ReleaseValue(attention_mask_tensor);
+        }
+        if (input_ids_tensor) {
+            g_ort->ReleaseValue(input_ids_tensor);
+        }
+        if (memory_info) {
+            g_ort->ReleaseMemoryInfo(memory_info);
+        }
+        if (token_ids) {
+            pfree(token_ids);
+        }
+        if (attention_mask) {
+            pfree(attention_mask);
+        }
     }
+    PG_END_TRY();
 
-    /* Create token_type_ids tensor */
-    status = g_ort->CreateTensorWithDataAsOrtValue(
-        memory_info, token_type_ids, input_size,
-        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-        &token_type_ids_tensor);
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        g_ort->ReleaseStatus(status);
-        g_ort->ReleaseValue(input_ids_tensor);
-        g_ort->ReleaseValue(attention_mask_tensor);
-        g_ort->ReleaseMemoryInfo(memory_info);
-        ereport(ERROR, (errmsg("Failed to create token_type_ids tensor: %s", msg)));
-    }
-
-    g_ort->ReleaseMemoryInfo(memory_info);
-
-    /* Run inference (only input_ids and attention_mask for this model) */
-    const char* input_names[] = {"input_ids", "attention_mask"};
-    const char* output_names[] = {"sentence_embedding"};  /* Use pre-pooled embedding */
-    OrtValue* input_tensors[] = {input_ids_tensor, attention_mask_tensor};
-
-    status = g_ort->Run(
-        g_ort_session,
-        NULL,  /* run options */
-        input_names, (const OrtValue* const*)input_tensors, 2,
-        output_names, 1,
-        &output_tensor);
-
-    g_ort->ReleaseValue(input_ids_tensor);
-    g_ort->ReleaseValue(attention_mask_tensor);
-    g_ort->ReleaseValue(token_type_ids_tensor);  /* Still release it */
-
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        char* error_copy = pstrdup(msg);  /* Copy before releasing */
-        g_ort->ReleaseStatus(status);
-        ereport(ERROR, (errmsg("Failed to run inference: %s", error_copy)));
-    }
-
-    /* Extract output tensor data */
-    status = g_ort->GetTensorMutableData(output_tensor, (void**)&output_data);
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        g_ort->ReleaseStatus(status);
-        g_ort->ReleaseValue(output_tensor);
-        ereport(ERROR, (errmsg("Failed to get tensor data: %s", msg)));
-    }
-
-    /* Extract sentence embedding (already pooled and normalized by model) */
-    result = create_vector(MODEL_DIMS);
-    memcpy(result->x, output_data, MODEL_DIMS * sizeof(float));
-
-    g_ort->ReleaseValue(output_tensor);
-
-    SET_VARSIZE(result, VECTOR_SIZE(MODEL_DIMS));
     PG_RETURN_VECTOR_P(result);
 }
 
