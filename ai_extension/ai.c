@@ -394,8 +394,14 @@ void _PG_fini(void) {
 /*
  * Load ONNX model (lazy loading)
  * Called on first use of ai.embed()
+ * Uses PG_TRY/CATCH for proper resource cleanup on errors
  */
 static void load_model(void) {
+    OrtSessionOptions* session_options = NULL;
+    OrtStatus* status;
+    const char* models_path;
+    char model_path[1024];
+
     if (g_model_loaded) {
         return;  /* Already loaded */
     }
@@ -407,72 +413,94 @@ static void load_model(void) {
     elog(INFO, "ai extension: Loading bge-small-en-v1.5 model (PID %d)...", getpid());
 
     /* Get model path from environment or use default */
-    const char* models_path = getenv("AI_MODELS_PATH");
+    models_path = getenv("AI_MODELS_PATH");
     if (!models_path) {
         models_path = "/models";
     }
 
-    char model_path[1024];
     snprintf(model_path, sizeof(model_path), "%s/bge-small-en-v1.5.onnx", models_path);
 
-    /* Create session options */
-    OrtSessionOptions* session_options;
-    OrtStatus* status = g_ort->CreateSessionOptions(&session_options);
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        g_ort->ReleaseStatus(status);
-        elog(ERROR, "ai extension: Failed to create session options: %s", msg);
-    }
+    /* Use PG_TRY for proper cleanup on error */
+    PG_TRY();
+    {
+        /* Create session options */
+        status = g_ort->CreateSessionOptions(&session_options);
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            g_ort->ReleaseStatus(status);
+            elog(ERROR, "ai extension: Failed to create session options: %s", msg);
+        }
 
-    /* Set session options for deterministic CPU inference */
-    status = g_ort->SetIntraOpNumThreads(session_options, 1);
-    if (status != NULL) {
-        g_ort->ReleaseStatus(status);
-        /* Non-fatal, continue */
-    }
-    status = g_ort->SetSessionGraphOptimizationLevel(session_options, ORT_ENABLE_ALL);
-    if (status != NULL) {
-        g_ort->ReleaseStatus(status);
-        /* Non-fatal, continue */
-    }
+        /* Set session options for deterministic CPU inference */
+        status = g_ort->SetIntraOpNumThreads(session_options, 1);
+        if (status != NULL) {
+            g_ort->ReleaseStatus(status);
+            /* Non-fatal, continue */
+        }
 
-    /* Load model */
-    status = g_ort->CreateSession(g_ort_env, model_path, session_options, &g_ort_session);
-    g_ort->ReleaseSessionOptions(session_options);
+        status = g_ort->SetSessionGraphOptimizationLevel(session_options, ORT_ENABLE_ALL);
+        if (status != NULL) {
+            g_ort->ReleaseStatus(status);
+            /* Non-fatal, continue */
+        }
 
-    if (status != NULL) {
-        const char* msg = g_ort->GetErrorMessage(status);
-        g_ort->ReleaseStatus(status);
-        elog(ERROR, "ai extension: Failed to load model from %s: %s", model_path, msg);
-    }
+        /* Load model */
+        status = g_ort->CreateSession(g_ort_env, model_path, session_options, &g_ort_session);
 
-    g_model_loaded = true;
+        /* Release session options (success or failure) */
+        if (session_options) {
+            g_ort->ReleaseSessionOptions(session_options);
+            session_options = NULL;
+        }
 
-    /* Log model input/output info for debugging */
-    size_t num_inputs = 0, num_outputs = 0;
-    g_ort->SessionGetInputCount(g_ort_session, &num_inputs);
-    g_ort->SessionGetOutputCount(g_ort_session, &num_outputs);
-    elog(INFO, "ai extension: Model loaded successfully (~64MB, %zu inputs, %zu outputs)", num_inputs, num_outputs);
+        if (status != NULL) {
+            const char* msg = g_ort->GetErrorMessage(status);
+            g_ort->ReleaseStatus(status);
+            elog(ERROR, "ai extension: Failed to load model from %s: %s", model_path, msg);
+        }
 
-    /* Log input/output names */
-    OrtAllocator* allocator;
-    g_ort->GetAllocatorWithDefaultOptions(&allocator);
-    for (size_t i = 0; i < num_inputs && i < 5; i++) {
-        char* name;
-        status = g_ort->SessionGetInputName(g_ort_session, i, allocator, &name);
-        if (status == NULL) {
-            elog(INFO, "  Input %zu: %s", i, name);
-            allocator->Free(allocator, name);
+        g_model_loaded = true;
+
+        /* Log model input/output info for debugging */
+        size_t num_inputs = 0, num_outputs = 0;
+        g_ort->SessionGetInputCount(g_ort_session, &num_inputs);
+        g_ort->SessionGetOutputCount(g_ort_session, &num_outputs);
+        elog(INFO, "ai extension: Model loaded successfully (~64MB, %zu inputs, %zu outputs)", num_inputs, num_outputs);
+
+        /* Log input/output names */
+        OrtAllocator* allocator;
+        g_ort->GetAllocatorWithDefaultOptions(&allocator);
+        for (size_t i = 0; i < num_inputs && i < 5; i++) {
+            char* name;
+            status = g_ort->SessionGetInputName(g_ort_session, i, allocator, &name);
+            if (status == NULL) {
+                elog(INFO, "  Input %zu: %s", i, name);
+                allocator->Free(allocator, name);
+            }
+        }
+        for (size_t i = 0; i < num_outputs && i < 5; i++) {
+            char* name;
+            status = g_ort->SessionGetOutputName(g_ort_session, i, allocator, &name);
+            if (status == NULL) {
+                elog(INFO, "  Output %zu: %s", i, name);
+                allocator->Free(allocator, name);
+            }
         }
     }
-    for (size_t i = 0; i < num_outputs && i < 5; i++) {
-        char* name;
-        status = g_ort->SessionGetOutputName(g_ort_session, i, allocator, &name);
-        if (status == NULL) {
-            elog(INFO, "  Output %zu: %s", i, name);
-            allocator->Free(allocator, name);
+    PG_CATCH();
+    {
+        /* Clean up on error */
+        if (session_options) {
+            g_ort->ReleaseSessionOptions(session_options);
         }
+        if (g_ort_session) {
+            g_ort->ReleaseSession(g_ort_session);
+            g_ort_session = NULL;
+        }
+        g_model_loaded = false;
+        PG_RE_THROW();
     }
+    PG_END_TRY();
 }
 
 /* Old simple_tokenize removed - now using wordpiece_tokenize above */
