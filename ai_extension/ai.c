@@ -14,6 +14,7 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 #include "funcapi.h"
 #include "extension/vector/vector.h"
 #include <onnxruntime_c_api.h>
@@ -38,14 +39,15 @@ static bool g_model_loaded = false;
 #define MAX_VOCAB_SIZE 50000
 #define MAX_SEQ_LENGTH 512
 
-/* Vocabulary for BERT tokenizer */
+/* Vocabulary hash table entry */
 typedef struct {
-    char** tokens;           /* Token strings */
-    int* token_ids;          /* Token ID for each token */
-    int size;                /* Number of tokens in vocab */
-} Vocabulary;
+    char token[256];    /* Token string - must be first field for hash key */
+    int token_id;       /* Token ID value */
+} VocabEntry;
 
-static Vocabulary g_vocab = {NULL, NULL, 0};
+/* Global vocabulary state */
+static HTAB* g_vocab_hash = NULL;
+static int g_vocab_size = 0;
 static bool g_vocab_loaded = false;
 
 /* Special token IDs */
@@ -72,14 +74,16 @@ static Vector* create_vector(int dim) {
 }
 
 /*
- * Load BERT vocabulary from vocab.txt
+ * Load BERT vocabulary from vocab.txt into hash table
+ * Uses PostgreSQL's HTAB for O(1) lookup performance
  */
 static void load_vocabulary(void) {
-    FILE* fp;
+    FILE* fp = NULL;
     char line[256];
     int token_id = 0;
     const char* models_path;
     char vocab_path[1024];
+    HASHCTL hash_ctl;
 
     if (g_vocab_loaded) {
         return;
@@ -92,47 +96,112 @@ static void load_vocabulary(void) {
 
     snprintf(vocab_path, sizeof(vocab_path), "%s/vocab.txt", models_path);
 
+    /* Open file FIRST, before allocating hash table */
     fp = fopen(vocab_path, "r");
     if (!fp) {
         elog(ERROR, "Failed to open vocabulary file: %s", vocab_path);
+        return;
     }
 
-    /* Allocate vocabulary arrays */
-    g_vocab.tokens = (char**)palloc(MAX_VOCAB_SIZE * sizeof(char*));
-    g_vocab.token_ids = (int*)palloc(MAX_VOCAB_SIZE * sizeof(int));
+    /* Initialize hash table for O(1) token lookup */
+    memset(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = 256;  /* Max token length */
+    hash_ctl.entrysize = sizeof(VocabEntry);
+    hash_ctl.hash = string_hash;  /* PostgreSQL's string hash function */
 
-    /* Read vocabulary file */
-    while (fgets(line, sizeof(line), fp) && token_id < MAX_VOCAB_SIZE) {
-        /* Remove newline */
-        size_t len = strlen(line);
-        if (len > 0 && line[len-1] == '\n') {
-            line[len-1] = '\0';
+    g_vocab_hash = hash_create("vocab_hash",
+                                MAX_VOCAB_SIZE,  /* Initial size */
+                                &hash_ctl,
+                                HASH_ELEM | HASH_FUNCTION);
+
+    if (!g_vocab_hash) {
+        fclose(fp);
+        elog(ERROR, "Failed to create vocabulary hash table");
+        return;
+    }
+
+    /* Use PG_TRY for cleanup on error */
+    PG_TRY();
+    {
+        /* Read vocabulary file and populate hash table */
+        while (fgets(line, sizeof(line), fp) && token_id < MAX_VOCAB_SIZE) {
+            VocabEntry* entry;
+            bool found;
+            size_t len = strlen(line);
+
+            /* Remove newline */
+            if (len > 0 && line[len-1] == '\n') {
+                line[len-1] = '\0';
+                len--;
+            }
+
+            /* Validate token */
+            if (len == 0) {
+                elog(WARNING, "Empty token at line %d, skipping", token_id + 1);
+                continue;
+            }
+
+            if (len >= 256) {
+                elog(WARNING, "Token too long at line %d (len=%zu), truncating",
+                     token_id + 1, len);
+                line[255] = '\0';
+            }
+
+            /* Insert into hash table */
+            entry = (VocabEntry*)hash_search(g_vocab_hash, line, HASH_ENTER, &found);
+            if (!found) {
+                /* New entry - set token_id */
+                entry->token_id = token_id;
+                token_id++;
+            } else {
+                elog(WARNING, "Duplicate token at line %d: %s", token_id + 1, line);
+            }
         }
 
-        /* Store token */
-        g_vocab.tokens[token_id] = pstrdup(line);
-        g_vocab.token_ids[token_id] = token_id;
-        token_id++;
+        fclose(fp);
+        fp = NULL;
+
+        g_vocab_size = token_id;
+        g_vocab_loaded = true;
+
+        elog(INFO, "ai extension: Loaded vocabulary with %d tokens into hash table (O(1) lookup)",
+             g_vocab_size);
     }
-
-    fclose(fp);
-
-    g_vocab.size = token_id;
-    g_vocab_loaded = true;
-
-    elog(INFO, "ai extension: Loaded vocabulary with %d tokens", g_vocab.size);
+    PG_CATCH();
+    {
+        /* Clean up on error */
+        if (fp) {
+            fclose(fp);
+        }
+        if (g_vocab_hash) {
+            hash_destroy(g_vocab_hash);
+            g_vocab_hash = NULL;
+        }
+        g_vocab_loaded = false;
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 }
 
 /*
- * Find token ID in vocabulary (simple linear search)
+ * Find token ID in vocabulary using hash table (O(1) lookup)
+ * Replaces previous O(n) linear search implementation
  */
 static int find_token_id(const char* token) {
-    int i;
-    for (i = 0; i < g_vocab.size; i++) {
-        if (strcmp(g_vocab.tokens[i], token) == 0) {
-            return i;
-        }
+    VocabEntry* entry;
+    bool found;
+
+    if (!g_vocab_hash) {
+        return TOKEN_UNK;
     }
+
+    /* Hash table lookup - O(1) average case */
+    entry = (VocabEntry*)hash_search(g_vocab_hash, token, HASH_FIND, &found);
+
+    if (found) {
+        return entry->token_id;
+    }
+
     return TOKEN_UNK;
 }
 
@@ -301,6 +370,14 @@ void _PG_init(void) {
  * Extension cleanup
  */
 void _PG_fini(void) {
+    /* Clean up vocabulary hash table */
+    if (g_vocab_hash) {
+        hash_destroy(g_vocab_hash);
+        g_vocab_hash = NULL;
+        g_vocab_loaded = false;
+    }
+
+    /* Clean up ONNX Runtime resources */
     if (g_ort_session) {
         g_ort->ReleaseSession(g_ort_session);
         g_ort_session = NULL;
