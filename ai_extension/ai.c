@@ -16,11 +16,14 @@
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 #include "funcapi.h"
+#include "mb/pg_wchar.h"
 #include "extension/vector/vector.h"
 #include <onnxruntime_c_api.h>
 #include <string.h>
 #include <unistd.h>
 #include <math.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 PG_MODULE_MAGIC;
 
@@ -96,6 +99,20 @@ static void load_vocabulary(void) {
 
     snprintf(vocab_path, sizeof(vocab_path), "%s/vocab.txt", models_path);
 
+    /* Validate vocabulary path for security (improvement #12) */
+    if (strstr(vocab_path, "..") != NULL) {
+        elog(ERROR, "ai extension: Path traversal attempt blocked: %s", vocab_path);
+        return;
+    }
+
+    /* Check file exists and is readable */
+    if (access(vocab_path, R_OK) != 0) {
+        int saved_errno = errno;
+        elog(ERROR, "ai extension: Cannot access vocabulary file: %s (error %d)",
+             vocab_path, saved_errno);
+        return;
+    }
+
     /* Open file FIRST, before allocating hash table */
     fp = fopen(vocab_path, "r");
     if (!fp) {
@@ -145,6 +162,20 @@ static void load_vocabulary(void) {
                 elog(WARNING, "Token too long at line %d (len=%zu), truncating",
                      token_id + 1, len);
                 line[255] = '\0';
+                len = 255;
+            }
+
+            /* Check for control characters (improvement #12) */
+            bool has_control_chars = false;
+            for (size_t i = 0; i < len; i++) {
+                if ((unsigned char)line[i] < 32 && line[i] != '\t') {
+                    elog(WARNING, "Control character in token at line %d, skipping", token_id + 1);
+                    has_control_chars = true;
+                    break;
+                }
+            }
+            if (has_control_chars) {
+                continue;
             }
 
             /* Insert into hash table */
@@ -437,6 +468,33 @@ static void load_model(void) {
 
     snprintf(model_path, sizeof(model_path), "%s/bge-small-en-v1.5.onnx", models_path);
 
+    /* Validate model path for security (improvement #12) */
+    if (strstr(model_path, "..") != NULL) {
+        elog(ERROR, "ai extension: Path traversal attempt blocked: %s", model_path);
+    }
+
+    if (model_path[0] != '/') {
+        elog(ERROR, "ai extension: Model path must be absolute: %s", model_path);
+    }
+
+    /* Check file exists and is readable */
+    if (access(model_path, R_OK) != 0) {
+        int saved_errno = errno;
+        elog(ERROR, "ai extension: Cannot access model file: %s (error %d)",
+             model_path, saved_errno);
+    }
+
+    /* Check file size (should be ~64MB for bge-small) */
+    struct stat st;
+    if (stat(model_path, &st) == 0) {
+        if (st.st_size < 1024 * 1024) {
+            elog(WARNING, "ai extension: Model file seems too small: %ld bytes", (long)st.st_size);
+        }
+        if (st.st_size > 500 * 1024 * 1024) {
+            elog(WARNING, "ai extension: Model file seems too large: %ld bytes", (long)st.st_size);
+        }
+    }
+
     /* Use PG_TRY for proper cleanup on error */
     PG_TRY();
     {
@@ -576,6 +634,22 @@ Datum ai_embed(PG_FUNCTION_ARGS) {
 
     /* Convert to C string */
     text_str = text_to_cstring(input_text);
+
+    /* Validate UTF-8 encoding (improvement #12) */
+    if (!pg_verify_mbstr(PG_UTF8, text_str, text_len, false)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+             errmsg("Invalid UTF-8 sequence in input text"),
+             errhint("Ensure input text is valid UTF-8 encoding")));
+    }
+
+    /* Check for null bytes (invalid in text) */
+    if (strlen(text_str) != text_len) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("Input text contains null bytes"),
+             errhint("Remove null bytes from input text")));
+    }
 
     /* Allocate arrays on heap to avoid stack overflow (improvement #5) */
     token_ids = (int64_t*)palloc(MAX_SEQ_LENGTH * sizeof(int64_t));
