@@ -107,12 +107,12 @@ static void load_vocabulary(void) {
     memset(&hash_ctl, 0, sizeof(hash_ctl));
     hash_ctl.keysize = 256;  /* Max token length */
     hash_ctl.entrysize = sizeof(VocabEntry);
-    hash_ctl.hash = string_hash;  /* PostgreSQL's string hash function */
+    /* Use default string hash function */
 
     g_vocab_hash = hash_create("vocab_hash",
                                 MAX_VOCAB_SIZE,  /* Initial size */
                                 &hash_ctl,
-                                HASH_ELEM | HASH_FUNCTION);
+                                HASH_ELEM | HASH_STRINGS);
 
     if (!g_vocab_hash) {
         fclose(fp);
