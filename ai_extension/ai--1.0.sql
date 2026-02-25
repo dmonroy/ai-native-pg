@@ -29,7 +29,7 @@ CREATE FUNCTION ai.classify_cache_stats()
 
 -- Classification function (array variant)
 -- Classifies content into one of the provided categories using semantic similarity
-CREATE FUNCTION ai.classify(text, text[]) RETURNS text
+CREATE FUNCTION ai.classify(content text, categories text[]) RETURNS text
   IMMUTABLE           -- Deterministic: same input always returns same output
   STRICT              -- Returns NULL for NULL content (errors on NULL categories)
   PARALLEL SAFE       -- Can run in parallel workers
@@ -38,7 +38,7 @@ CREATE FUNCTION ai.classify(text, text[]) RETURNS text
 
 -- Classification function with threshold
 -- Returns best category only if similarity >= threshold, NULL otherwise
-CREATE FUNCTION ai.classify(text, text[], double precision) RETURNS text
+CREATE FUNCTION ai.classify(content text, categories text[], threshold double precision) RETURNS text
   IMMUTABLE           -- Deterministic: same input always returns same output
   PARALLEL SAFE       -- Can run in parallel workers
   LANGUAGE C
@@ -46,7 +46,7 @@ CREATE FUNCTION ai.classify(text, text[], double precision) RETURNS text
 
 -- Multi-label classification (top-K)
 -- Returns top K most similar categories sorted by similarity
-CREATE FUNCTION ai.classify(text, text[], integer) RETURNS text[]
+CREATE FUNCTION ai.classify(content text, categories text[], top_k integer) RETURNS text[]
   IMMUTABLE           -- Deterministic: same input always returns same output
   STRICT              -- Returns NULL for NULL content
   PARALLEL SAFE       -- Can run in parallel workers
@@ -55,7 +55,7 @@ CREATE FUNCTION ai.classify(text, text[], integer) RETURNS text[]
 
 -- Combined threshold + top-K classification
 -- Returns top K categories that meet minimum similarity threshold
-CREATE FUNCTION ai.classify(text, text[], double precision, integer) RETURNS text[]
+CREATE FUNCTION ai.classify(content text, categories text[], threshold double precision, top_k integer) RETURNS text[]
   IMMUTABLE           -- Deterministic: same input always returns same output
   PARALLEL SAFE       -- Can run in parallel workers
   LANGUAGE C

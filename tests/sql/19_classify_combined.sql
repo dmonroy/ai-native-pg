@@ -5,61 +5,61 @@
 
 -- Test basic combined: threshold 0.5, top-3
 SELECT array_length(ai.classify(
-    'Python programming and software development',
-    ARRAY['technology', 'sports', 'cooking', 'finance', 'politics'],
-    0.5,
-    3
+    content => 'Python programming and software development',
+    categories => ARRAY['technology', 'sports', 'cooking', 'finance', 'politics'],
+    threshold => 0.5,
+    top_k => 3
 ), 1) <= 3 AS returns_at_most_three;
 
 -- Test high threshold may return fewer than top_k
 SELECT array_length(ai.classify(
-    'Generic ambiguous content here',
-    ARRAY['category1', 'category2', 'category3'],
-    0.9,
-    3
+    content => 'Generic ambiguous content here',
+    categories => ARRAY['category1', 'category2', 'category3'],
+    threshold => 0.9,
+    top_k => 3
 ), 1) <= 3 AS fewer_than_topk_ok;
 
 -- Test low threshold returns full top_k
 SELECT array_length(ai.classify(
-    'Technology and computers',
-    ARRAY['tech', 'sports', 'cooking'],
-    0.1,
-    2
+    content => 'Technology and computers',
+    categories => ARRAY['tech', 'sports', 'cooking'],
+    threshold => 0.1,
+    top_k => 2
 ), 1) = 2 AS low_threshold_full_topk;
 
 -- Test all below threshold returns empty array
 SELECT ai.classify(
-    'Random unrelated content xyz',
-    ARRAY['very_specific_cat1', 'very_specific_cat2'],
-    0.95,
-    5
+    content => 'Random unrelated content xyz',
+    categories => ARRAY['very_specific_cat1', 'very_specific_cat2'],
+    threshold => 0.95,
+    top_k => 5
 ) = ARRAY[]::text[] AS all_below_threshold;
 
 -- Test NULL content returns NULL
 SELECT ai.classify(
-    NULL,
-    ARRAY['tech', 'sports'],
-    0.5,
-    3
+    content => NULL,
+    categories => ARRAY['tech', 'sports'],
+    threshold => 0.5,
+    top_k => 3
 ) IS NULL AS null_content;
 
 -- Test realistic: content moderation with multi-label
 SELECT ai.classify(
-    'This product is good quality laptop computer',
-    ARRAY['spam', 'appropriate', 'offensive', 'promotional'],
-    0.4,
-    2
+    content => 'This product is good quality laptop computer',
+    categories => ARRAY['spam', 'appropriate', 'offensive', 'promotional'],
+    threshold => 0.4,
+    top_k => 2
 ) @> ARRAY['appropriate'] AS moderation_multilabel;
 
 -- Test cache works with combined variant
-SELECT array_length(ai.classify('tech', ARRAY['a', 'b'], 0.1, 2), 1) >= 0 AS call1;
-SELECT array_length(ai.classify('sports', ARRAY['a', 'b'], 0.1, 2), 1) >= 0 AS call2;
+SELECT array_length(ai.classify(content => 'tech', categories => ARRAY['a', 'b'], threshold => 0.1, top_k => 2), 1) >= 0 AS call1;
+SELECT array_length(ai.classify(content => 'sports', categories => ARRAY['a', 'b'], threshold => 0.1, top_k => 2), 1) >= 0 AS call2;
 SELECT entries >= 2 AS cache_working FROM ai.classify_cache_stats();
 
 -- Test unicode with combined
 SELECT ai.classify(
-    'Technology news',
-    ARRAY['技術', 'スポーツ', '料理'],
-    0.3,
-    2
+    content => 'Technology news',
+    categories => ARRAY['技術', 'スポーツ', '料理'],
+    threshold => 0.3,
+    top_k => 2
 ) <@ ARRAY['技術', 'スポーツ', '料理'] AS unicode_combined;
