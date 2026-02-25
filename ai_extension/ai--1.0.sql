@@ -27,13 +27,6 @@ CREATE FUNCTION ai.classify_cache_stats()
   LANGUAGE C
   AS '$libdir/ai', 'ai_classify_cache_stats';
 
--- Test wrapper for category embedding cache
--- Exposes get_category_embedding() for testing
-CREATE FUNCTION ai.test_get_category_embedding(text) RETURNS vector
-  STABLE
-  LANGUAGE C
-  AS '$libdir/ai', 'ai_test_get_category_embedding';
-
 -- Version function
 CREATE FUNCTION ai.version() RETURNS text
   IMMUTABLE
@@ -44,4 +37,3 @@ COMMENT ON SCHEMA ai IS 'AI-native primitives for PostgreSQL';
 COMMENT ON FUNCTION ai.embed(text) IS 'Generate embedding using nomic-embed-text-v1.5 (768-dim, MTEB 62.28)';
 COMMENT ON FUNCTION ai.health_check() IS 'Check if ONNX model is loaded and working';
 COMMENT ON FUNCTION ai.classify_cache_stats() IS 'Get category embedding cache statistics (hits, misses, entries, memory)';
-COMMENT ON FUNCTION ai.test_get_category_embedding(text) IS 'Test function: get or compute category embedding with caching';
