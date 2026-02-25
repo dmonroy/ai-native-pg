@@ -15,6 +15,8 @@
 #include "fmgr.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
+#include "utils/guc.h"
+#include "access/hash.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "extension/vector/vector.h"
@@ -59,6 +61,38 @@ static bool g_vocab_loaded = false;
 #define TOKEN_CLS 101
 #define TOKEN_SEP 102
 #define TOKEN_MASK 103
+
+/*
+ * Category Embedding Cache
+ *
+ * Critical performance optimization for ai.classify():
+ * - Without cache: 5 categories × 5ms = 25ms per classification (95% wasted)
+ * - With cache: 5 categories × 0.01ms = 0.05ms per classification
+ *
+ * Memory layout per entry: ~3.3KB
+ * - category_text: 256 bytes (max category name length)
+ * - embedding: 768 floats × 4 bytes = 3,072 bytes
+ * - HTAB overhead: ~100 bytes
+ * Total: ~3,428 bytes ≈ 3.4KB per entry (design called for ~2KB but this is more realistic)
+ */
+typedef struct {
+    char category_text[256];    /* Category string - must be first field for hash key */
+    float embedding[MODEL_DIMS]; /* Precomputed embedding vector (768 dims) */
+} CategoryCacheEntry;
+
+/* Global category cache state (per backend process) */
+static HTAB* g_category_cache = NULL;
+static bool g_category_cache_initialized = false;
+
+/* Cache statistics for monitoring */
+static int64 g_cache_hits = 0;
+static int64 g_cache_misses = 0;
+
+/* GUC variables */
+static int ai_max_cached_categories = 10000; /* Default: 10K categories (~34MB) */
+
+/* Forward declarations */
+Datum ai_embed(PG_FUNCTION_ARGS);
 
 /*
  * Initialize a Vector (pgvector helper)
@@ -388,6 +422,117 @@ static void wordpiece_tokenize(const char* text, int64_t* token_ids, size_t* tok
 }
 
 /*
+ * Initialize category embedding cache
+ * Lazy initialization on first use
+ */
+static void init_category_cache(void) {
+    HASHCTL hash_ctl;
+
+    if (g_category_cache_initialized) {
+        return;
+    }
+
+    /* Configure hash table */
+    MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = 256;  /* Size of category_text field */
+    hash_ctl.entrysize = sizeof(CategoryCacheEntry);
+    hash_ctl.hash = string_hash;  /* Use PostgreSQL's string hash function */
+
+    /* Create hash table with initial size for 1024 entries */
+    g_category_cache = hash_create("AI Category Embedding Cache",
+                                   1024,
+                                   &hash_ctl,
+                                   HASH_ELEM | HASH_FUNCTION);
+
+    g_category_cache_initialized = true;
+    elog(DEBUG1, "ai extension: Category cache initialized (max entries: %d)",
+         ai_max_cached_categories);
+}
+
+/*
+ * Get or compute category embedding
+ * Returns pointer to cached embedding (do not free!)
+ *
+ * This is the core cache function that provides 10-100× speedup:
+ * - Cache hit: ~0.01ms (hash lookup)
+ * - Cache miss: ~5ms (embedding computation + cache storage)
+ */
+static float* get_category_embedding(const char* category_text) {
+    CategoryCacheEntry* entry;
+    bool found;
+    char key[256];
+    Vector* embedding_vec;
+    text* category_text_pg;
+
+    /* Initialize cache on first use */
+    init_category_cache();
+
+    /* Check cache size limit */
+    if (hash_get_num_entries(g_category_cache) >= ai_max_cached_categories) {
+        elog(WARNING, "ai extension: Category cache full (%d entries), cache miss will still work but may be slow",
+             ai_max_cached_categories);
+    }
+
+    /* Prepare key (truncate if needed) */
+    strncpy(key, category_text, sizeof(key) - 1);
+    key[sizeof(key) - 1] = '\0';
+
+    /* Look up in cache */
+    entry = (CategoryCacheEntry*) hash_search(g_category_cache,
+                                               key,
+                                               HASH_FIND,
+                                               &found);
+
+    if (found) {
+        /* Cache hit! */
+        g_cache_hits++;
+        elog(DEBUG2, "ai extension: Category cache HIT for '%s' (hits: %lld, misses: %lld)",
+             category_text, (long long)g_cache_hits, (long long)g_cache_misses);
+        return entry->embedding;
+    }
+
+    /* Cache miss - compute embedding */
+    g_cache_misses++;
+    elog(DEBUG2, "ai extension: Category cache MISS for '%s' (hits: %lld, misses: %lld)",
+         category_text, (long long)g_cache_hits, (long long)g_cache_misses);
+
+    /* Convert category text to PostgreSQL text type for ai_embed */
+    category_text_pg = cstring_to_text(category_text);
+
+    /* Compute embedding using ai_embed - note: this is called from within the same transaction */
+    embedding_vec = DatumGetVector(DirectFunctionCall1(ai_embed, PointerGetDatum(category_text_pg)));
+
+    /* Verify dimensions */
+    if (embedding_vec->dim != MODEL_DIMS) {
+        elog(ERROR, "ai extension: Category embedding dimension mismatch: expected %d, got %d",
+             MODEL_DIMS, embedding_vec->dim);
+    }
+
+    /* Store in cache (HASH_ENTER will create new entry if not at max size) */
+    if (hash_get_num_entries(g_category_cache) < ai_max_cached_categories) {
+        entry = (CategoryCacheEntry*) hash_search(g_category_cache,
+                                                   key,
+                                                   HASH_ENTER,
+                                                   &found);
+        if (entry) {
+            /* Copy embedding data */
+            memcpy(entry->embedding, embedding_vec->x, MODEL_DIMS * sizeof(float));
+            /* Hash value is computed internally by HTAB */
+
+            elog(DEBUG1, "ai extension: Cached embedding for category '%s' (total entries: %ld)",
+                 category_text, hash_get_num_entries(g_category_cache));
+        }
+    } else {
+        elog(DEBUG1, "ai extension: Cache full, not caching category '%s'", category_text);
+        /* Even if cache is full, we still computed the embedding - need to handle this */
+        /* For now, we'll just return it without caching - caller must copy if needed */
+        return embedding_vec->x;
+    }
+
+    return entry->embedding;
+}
+
+/*
  * Extension initialization
  * Called once per backend process when extension is loaded
  */
@@ -410,14 +555,45 @@ void _PG_init(void) {
         return;
     }
 
+    /* Register GUCs (Grand Unified Configuration) */
+    DefineCustomIntVariable("ai.max_cached_categories",
+                            "Maximum number of category embeddings to cache",
+                            "Category embeddings are cached to speed up classification. "
+                            "Default is 10000 categories (~34MB). Min 100, Max 100000.",
+                            &ai_max_cached_categories,
+                            10000,  /* default */
+                            100,    /* min */
+                            100000, /* max */
+                            PGC_USERSET,
+                            0,
+                            NULL, NULL, NULL);
+
     g_initialized = true;
     elog(INFO, "ai extension: ONNX Runtime initialized (models will be loaded on first use)");
+    elog(DEBUG1, "ai extension: GUC ai.max_cached_categories = %d", ai_max_cached_categories);
 }
 
 /*
  * Extension cleanup
  */
 void _PG_fini(void) {
+    /* Log cache statistics before cleanup */
+    if (g_category_cache_initialized && g_category_cache) {
+        elog(DEBUG1, "ai extension: Category cache stats - hits: %lld, misses: %lld, entries: %ld, hit_ratio: %.2f%%",
+             (long long)g_cache_hits,
+             (long long)g_cache_misses,
+             hash_get_num_entries(g_category_cache),
+             (g_cache_hits + g_cache_misses) > 0 ?
+                 100.0 * g_cache_hits / (g_cache_hits + g_cache_misses) : 0.0);
+    }
+
+    /* Clean up category cache */
+    if (g_category_cache) {
+        hash_destroy(g_category_cache);
+        g_category_cache = NULL;
+        g_category_cache_initialized = false;
+    }
+
     /* Clean up vocabulary hash table */
     if (g_vocab_hash) {
         hash_destroy(g_vocab_hash);
@@ -837,4 +1013,92 @@ Datum ai_health_check(PG_FUNCTION_ARGS) {
     }
 
     PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+/*
+ * ai.classify_cache_stats()
+ *
+ * Returns cache statistics for monitoring performance
+ * Returns: table(hits bigint, misses bigint, entries bigint, memory_mb numeric)
+ */
+PG_FUNCTION_INFO_V1(ai_classify_cache_stats);
+Datum ai_classify_cache_stats(PG_FUNCTION_ARGS) {
+    TupleDesc tupdesc;
+    Datum values[4];
+    bool nulls[4];
+    HeapTuple tuple;
+    int64 num_entries = 0;
+    double memory_mb = 0.0;
+
+    /* Build tuple descriptor */
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("function returning record called in context that cannot accept type record")));
+    }
+
+    /* Get cache statistics */
+    if (g_category_cache_initialized && g_category_cache) {
+        num_entries = hash_get_num_entries(g_category_cache);
+        /* Memory calculation: ~3.4KB per entry (256B text + 3KB embedding + overhead) */
+        memory_mb = (num_entries * 3.4) / 1024.0;
+    }
+
+    /* Build result tuple */
+    MemSet(nulls, 0, sizeof(nulls));
+    values[0] = Int64GetDatum(g_cache_hits);
+    values[1] = Int64GetDatum(g_cache_misses);
+    values[2] = Int64GetDatum(num_entries);
+    values[3] = Float8GetDatum(memory_mb);
+
+    tuple = heap_form_tuple(tupdesc, values, nulls);
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * ai.test_get_category_embedding(text)
+ *
+ * Test wrapper for get_category_embedding() internal function
+ * Exposes cache functionality for testing
+ * Returns: vector(768)
+ */
+PG_FUNCTION_INFO_V1(ai_test_get_category_embedding);
+Datum ai_test_get_category_embedding(PG_FUNCTION_ARGS) {
+    text* category_text_arg;
+    char* category_text;
+    float* embedding;
+    Vector* result;
+
+    /* Check for NULL input */
+    if (PG_ARGISNULL(0)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("category text cannot be NULL")));
+    }
+
+    /* Get category text */
+    category_text_arg = PG_GETARG_TEXT_PP(0);
+    category_text = text_to_cstring(category_text_arg);
+
+    /* Validate input */
+    if (strlen(category_text) == 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("category text cannot be empty")));
+    }
+
+    if (strlen(category_text) >= 256) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("category text too long (max 255 characters)")));
+    }
+
+    /* Get or compute embedding */
+    embedding = get_category_embedding(category_text);
+
+    /* Convert to Vector type */
+    result = create_vector(MODEL_DIMS);
+    memcpy(result->x, embedding, MODEL_DIMS * sizeof(float));
+
+    PG_RETURN_POINTER(result);
 }
