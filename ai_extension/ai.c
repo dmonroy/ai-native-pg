@@ -533,6 +533,26 @@ static float* get_category_embedding(const char* category_text) {
 }
 
 /*
+ * Calculate cosine similarity between two vectors
+ * Returns value in range [-1, 1] where:
+ *   1.0 = identical direction (most similar)
+ *   0.0 = perpendicular (unrelated)
+ *  -1.0 = opposite direction (most dissimilar)
+ *
+ * For normalized vectors (as our embeddings are), this is just dot product.
+ */
+static float cosine_similarity(const float* a, const float* b, int dims) {
+    float dot_product = 0.0f;
+
+    /* Compute dot product */
+    for (int i = 0; i < dims; i++) {
+        dot_product += a[i] * b[i];
+    }
+
+    return dot_product;
+}
+
+/*
  * Extension initialization
  * Called once per backend process when extension is loaded
  */
@@ -1053,5 +1073,143 @@ Datum ai_classify_cache_stats(PG_FUNCTION_ARGS) {
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * ai.classify(text, text[])
+ *
+ * Classify content into one of the provided categories using semantic similarity
+ * Returns the category with highest cosine similarity to the content
+ *
+ * Algorithm:
+ * 1. Compute embedding for content text (1× ai.embed call)
+ * 2. Get embeddings for each category (N× cache lookups, very fast)
+ * 3. Calculate cosine similarity between content and each category
+ * 4. Return category with highest similarity score
+ *
+ * Performance: ~5ms for first call + ~0.01ms per cached category
+ */
+PG_FUNCTION_INFO_V1(ai_classify_array);
+Datum ai_classify_array(PG_FUNCTION_ARGS) {
+    text* content_text;
+    ArrayType* categories_array;
+    char* content_str;
+    Vector* content_embedding;
+    int num_categories;
+    Datum* category_datums;
+    bool* category_nulls;
+    int best_index;
+    float best_similarity;
+    int i;
+
+    /* Handle NULL content - return NULL */
+    if (PG_ARGISNULL(0)) {
+        PG_RETURN_NULL();
+    }
+
+    /* Validate categories array */
+    if (PG_ARGISNULL(1)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("categories array cannot be NULL")));
+    }
+
+    /* Get content text */
+    content_text = PG_GETARG_TEXT_PP(0);
+    content_str = text_to_cstring(content_text);
+
+    /* Validate content is not empty */
+    if (strlen(content_str) == 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("content text cannot be empty")));
+    }
+
+    /* Get categories array */
+    categories_array = PG_GETARG_ARRAYTYPE_P(1);
+
+    /* Deconstruct array */
+    deconstruct_array(categories_array, TEXTOID, -1, false, 'i',
+                     &category_datums, &category_nulls, &num_categories);
+
+    /* Validate: at least 2 categories required */
+    if (num_categories < 2) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("at least 2 categories required, got %d", num_categories)));
+    }
+
+    /* Validate: no more than 1000 categories (reasonable limit) */
+    if (num_categories > 1000) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("too many categories: %d (maximum 1000)", num_categories)));
+    }
+
+    /* Compute content embedding */
+    content_embedding = DatumGetVector(DirectFunctionCall1(ai_embed, PointerGetDatum(content_text)));
+
+    /* Verify dimensions */
+    if (content_embedding->dim != MODEL_DIMS) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("content embedding dimension mismatch: expected %d, got %d",
+                        MODEL_DIMS, content_embedding->dim)));
+    }
+
+    /* Find best matching category */
+    best_index = -1;
+    best_similarity = -2.0f;  /* Start below minimum possible similarity (-1.0) */
+
+    for (i = 0; i < num_categories; i++) {
+        text* category_text;
+        char* category_str;
+        float* category_embedding;
+        float similarity;
+
+        /* Skip NULL categories */
+        if (category_nulls[i]) {
+            continue;
+        }
+
+        /* Get category string */
+        category_text = DatumGetTextPP(category_datums[i]);
+        category_str = text_to_cstring(category_text);
+
+        /* Validate category not empty */
+        if (strlen(category_str) == 0) {
+            ereport(WARNING,
+                    (errmsg("skipping empty category at index %d", i)));
+            continue;
+        }
+
+        /* Get category embedding from cache */
+        category_embedding = get_category_embedding(category_str);
+
+        /* Calculate cosine similarity */
+        similarity = cosine_similarity(content_embedding->x, category_embedding, MODEL_DIMS);
+
+        /* Track best match */
+        if (similarity > best_similarity) {
+            best_similarity = similarity;
+            best_index = i;
+        }
+
+        elog(DEBUG2, "ai.classify: category='%s' similarity=%.4f", category_str, similarity);
+    }
+
+    /* Ensure we found a valid category */
+    if (best_index < 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("no valid categories found")));
+    }
+
+    elog(DEBUG1, "ai.classify: best='%s' similarity=%.4f",
+         text_to_cstring(DatumGetTextPP(category_datums[best_index])),
+         best_similarity);
+
+    /* Return best matching category */
+    PG_RETURN_TEXT_P(DatumGetTextPP(category_datums[best_index]));
 }
 
