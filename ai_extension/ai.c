@@ -22,6 +22,7 @@
 #include "extension/vector/vector.h"
 #include <onnxruntime_c_api.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -1375,5 +1376,191 @@ Datum ai_classify_array_threshold(PG_FUNCTION_ARGS) {
 
     /* Return best matching category */
     PG_RETURN_TEXT_P(DatumGetTextPP(category_datums[best_index]));
+}
+
+/* Helper struct for sorting categories by similarity */
+typedef struct {
+    int index;
+    float similarity;
+} CategoryScore;
+
+/* Comparison function for qsort (descending order) */
+static int compare_category_scores(const void* a, const void* b) {
+    CategoryScore* score_a = (CategoryScore*)a;
+    CategoryScore* score_b = (CategoryScore*)b;
+
+    if (score_b->similarity > score_a->similarity) return 1;
+    if (score_b->similarity < score_a->similarity) return -1;
+    return 0;
+}
+
+/*
+ * ai.classify(text, text[], top_k)
+ *
+ * Multi-label classification - returns top K most similar categories
+ * Returns array of categories sorted by similarity (best first)
+ *
+ * top_k: Number of categories to return (1 to 100)
+ * If top_k > number of categories, returns all categories sorted
+ *
+ * Use cases:
+ * - Product tagging (multiple relevant tags)
+ * - Content categorization (primary + secondary categories)
+ * - Recommendation systems (top N similar items)
+ * - Search result classification (multiple applicable categories)
+ */
+PG_FUNCTION_INFO_V1(ai_classify_array_topk);
+Datum ai_classify_array_topk(PG_FUNCTION_ARGS) {
+    text* content_text;
+    ArrayType* categories_array;
+    int32 top_k;
+    char* content_str;
+    Vector* content_embedding;
+    int num_categories;
+    Datum* category_datums;
+    bool* category_nulls;
+    CategoryScore* scores;
+    Datum* result_datums;
+    ArrayType* result_array;
+    int result_count;
+    int i;
+
+    /* Handle NULL content - return NULL */
+    if (PG_ARGISNULL(0)) {
+        PG_RETURN_NULL();
+    }
+
+    /* Validate categories array */
+    if (PG_ARGISNULL(1)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("categories array cannot be NULL")));
+    }
+
+    /* Get top_k (default to 3 if NULL) */
+    if (PG_ARGISNULL(2)) {
+        top_k = 3;
+    } else {
+        top_k = PG_GETARG_INT32(2);
+    }
+
+    /* Validate top_k range */
+    if (top_k < 1) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("top_k must be at least 1, got %d", top_k)));
+    }
+
+    if (top_k > 100) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("top_k too large: %d (maximum 100)", top_k)));
+    }
+
+    /* Get content text */
+    content_text = PG_GETARG_TEXT_PP(0);
+    content_str = text_to_cstring(content_text);
+
+    /* Validate content is not empty */
+    if (strlen(content_str) == 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("content text cannot be empty")));
+    }
+
+    /* Get categories array */
+    categories_array = PG_GETARG_ARRAYTYPE_P(1);
+
+    /* Deconstruct array */
+    deconstruct_array(categories_array, TEXTOID, -1, false, 'i',
+                     &category_datums, &category_nulls, &num_categories);
+
+    /* Validate: at least 1 category required for top-k */
+    if (num_categories < 1) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("at least 1 category required")));
+    }
+
+    /* Validate: no more than 1000 categories */
+    if (num_categories > 1000) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("too many categories: %d (maximum 1000)", num_categories)));
+    }
+
+    /* Compute content embedding */
+    content_embedding = DatumGetVector(DirectFunctionCall1(ai_embed, PointerGetDatum(content_text)));
+
+    /* Verify dimensions */
+    if (content_embedding->dim != MODEL_DIMS) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("content embedding dimension mismatch: expected %d, got %d",
+                        MODEL_DIMS, content_embedding->dim)));
+    }
+
+    /* Allocate array for scores */
+    scores = (CategoryScore*)palloc(num_categories * sizeof(CategoryScore));
+
+    /* Calculate similarity for each category */
+    for (i = 0; i < num_categories; i++) {
+        text* category_text;
+        char* category_str;
+        float* category_embedding;
+        float similarity;
+
+        /* Skip NULL categories */
+        if (category_nulls[i]) {
+            scores[i].index = i;
+            scores[i].similarity = -2.0f;  /* Lowest possible */
+            continue;
+        }
+
+        /* Get category string */
+        category_text = DatumGetTextPP(category_datums[i]);
+        category_str = text_to_cstring(category_text);
+
+        /* Skip empty categories */
+        if (strlen(category_str) == 0) {
+            scores[i].index = i;
+            scores[i].similarity = -2.0f;
+            continue;
+        }
+
+        /* Get category embedding from cache */
+        category_embedding = get_category_embedding(category_str);
+
+        /* Calculate cosine similarity */
+        similarity = cosine_similarity(content_embedding->x, category_embedding, MODEL_DIMS);
+
+        scores[i].index = i;
+        scores[i].similarity = similarity;
+
+        elog(DEBUG2, "ai.classify(top_k): category='%s' similarity=%.4f", category_str, similarity);
+    }
+
+    /* Sort by similarity (descending) */
+    qsort(scores, num_categories, sizeof(CategoryScore), compare_category_scores);
+
+    /* Determine result count (min of top_k and num_categories) */
+    result_count = (top_k < num_categories) ? top_k : num_categories;
+
+    /* Build result array */
+    result_datums = (Datum*)palloc(result_count * sizeof(Datum));
+    for (i = 0; i < result_count; i++) {
+        int cat_index = scores[i].index;
+        result_datums[i] = category_datums[cat_index];
+
+        elog(DEBUG1, "ai.classify(top_k): rank %d: '%s' similarity=%.4f",
+             i + 1,
+             text_to_cstring(DatumGetTextPP(category_datums[cat_index])),
+             scores[i].similarity);
+    }
+
+    /* Construct result array */
+    result_array = construct_array(result_datums, result_count, TEXTOID, -1, false, 'i');
+
+    PG_RETURN_ARRAYTYPE_P(result_array);
 }
 

@@ -44,6 +44,15 @@ CREATE FUNCTION ai.classify(text, text[], double precision) RETURNS text
   LANGUAGE C
   AS '$libdir/ai', 'ai_classify_array_threshold';
 
+-- Multi-label classification (top-K)
+-- Returns top K most similar categories sorted by similarity
+CREATE FUNCTION ai.classify(text, text[], integer) RETURNS text[]
+  IMMUTABLE           -- Deterministic: same input always returns same output
+  STRICT              -- Returns NULL for NULL content
+  PARALLEL SAFE       -- Can run in parallel workers
+  LANGUAGE C
+  AS '$libdir/ai', 'ai_classify_array_topk';
+
 -- Version function
 CREATE FUNCTION ai.version() RETURNS text
   IMMUTABLE
@@ -56,3 +65,4 @@ COMMENT ON FUNCTION ai.health_check() IS 'Check if ONNX model is loaded and work
 COMMENT ON FUNCTION ai.classify_cache_stats() IS 'Get category embedding cache statistics (hits, misses, entries, memory)';
 COMMENT ON FUNCTION ai.classify(text, text[]) IS 'Classify content into one of the provided categories using semantic similarity';
 COMMENT ON FUNCTION ai.classify(text, text[], double precision) IS 'Classify content with minimum similarity threshold (0.0-1.0), returns NULL if below threshold';
+COMMENT ON FUNCTION ai.classify(text, text[], integer) IS 'Multi-label classification: returns top K most similar categories sorted by similarity';
