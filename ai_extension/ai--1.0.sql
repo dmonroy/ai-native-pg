@@ -53,6 +53,14 @@ CREATE FUNCTION ai.classify(text, text[], integer) RETURNS text[]
   LANGUAGE C
   AS '$libdir/ai', 'ai_classify_array_topk';
 
+-- Combined threshold + top-K classification
+-- Returns top K categories that meet minimum similarity threshold
+CREATE FUNCTION ai.classify(text, text[], double precision, integer) RETURNS text[]
+  IMMUTABLE           -- Deterministic: same input always returns same output
+  PARALLEL SAFE       -- Can run in parallel workers
+  LANGUAGE C
+  AS '$libdir/ai', 'ai_classify_array_threshold_topk';
+
 -- Version function
 CREATE FUNCTION ai.version() RETURNS text
   IMMUTABLE
@@ -66,3 +74,4 @@ COMMENT ON FUNCTION ai.classify_cache_stats() IS 'Get category embedding cache s
 COMMENT ON FUNCTION ai.classify(text, text[]) IS 'Classify content into one of the provided categories using semantic similarity';
 COMMENT ON FUNCTION ai.classify(text, text[], double precision) IS 'Classify content with minimum similarity threshold (0.0-1.0), returns NULL if below threshold';
 COMMENT ON FUNCTION ai.classify(text, text[], integer) IS 'Multi-label classification: returns top K most similar categories sorted by similarity';
+COMMENT ON FUNCTION ai.classify(text, text[], double precision, integer) IS 'Combined threshold + top-K: returns top K categories above threshold (may return fewer or empty array)';

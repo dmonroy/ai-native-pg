@@ -1564,3 +1564,197 @@ Datum ai_classify_array_topk(PG_FUNCTION_ARGS) {
     PG_RETURN_ARRAYTYPE_P(result_array);
 }
 
+/*
+ * ai.classify(text, text[], threshold, top_k)
+ *
+ * Combined threshold + multi-label classification
+ * Returns top K categories that meet minimum similarity threshold
+ * May return fewer than K if many categories below threshold
+ * Returns empty array if no categories meet threshold
+ *
+ * Most flexible variant - combines confidence filtering with multi-label
+ *
+ * Use cases:
+ * - High-confidence multi-label tagging
+ * - Quality-controlled recommendations
+ * - Threshold-filtered search results
+ */
+PG_FUNCTION_INFO_V1(ai_classify_array_threshold_topk);
+Datum ai_classify_array_threshold_topk(PG_FUNCTION_ARGS) {
+    text* content_text;
+    ArrayType* categories_array;
+    float8 threshold;
+    int32 top_k;
+    char* content_str;
+    Vector* content_embedding;
+    int num_categories;
+    Datum* category_datums;
+    bool* category_nulls;
+    CategoryScore* scores;
+    Datum* result_datums;
+    ArrayType* result_array;
+    int result_count;
+    int i;
+
+    /* Handle NULL content - return NULL */
+    if (PG_ARGISNULL(0)) {
+        PG_RETURN_NULL();
+    }
+
+    /* Validate categories array */
+    if (PG_ARGISNULL(1)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("categories array cannot be NULL")));
+    }
+
+    /* Get threshold (default to 0.0 if NULL) */
+    if (PG_ARGISNULL(2)) {
+        threshold = 0.0;
+    } else {
+        threshold = PG_GETARG_FLOAT8(2);
+    }
+
+    /* Validate threshold range */
+    if (threshold < 0.0 || threshold > 1.0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("threshold must be between 0.0 and 1.0, got %.4f", threshold)));
+    }
+
+    /* Get top_k (default to 3 if NULL) */
+    if (PG_ARGISNULL(3)) {
+        top_k = 3;
+    } else {
+        top_k = PG_GETARG_INT32(3);
+    }
+
+    /* Validate top_k range */
+    if (top_k < 1) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("top_k must be at least 1, got %d", top_k)));
+    }
+
+    if (top_k > 100) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("top_k too large: %d (maximum 100)", top_k)));
+    }
+
+    /* Get content text */
+    content_text = PG_GETARG_TEXT_PP(0);
+    content_str = text_to_cstring(content_text);
+
+    /* Validate content is not empty */
+    if (strlen(content_str) == 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("content text cannot be empty")));
+    }
+
+    /* Get categories array */
+    categories_array = PG_GETARG_ARRAYTYPE_P(1);
+
+    /* Deconstruct array */
+    deconstruct_array(categories_array, TEXTOID, -1, false, 'i',
+                     &category_datums, &category_nulls, &num_categories);
+
+    /* Validate: at least 1 category required */
+    if (num_categories < 1) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("at least 1 category required")));
+    }
+
+    /* Validate: no more than 1000 categories */
+    if (num_categories > 1000) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("too many categories: %d (maximum 1000)", num_categories)));
+    }
+
+    /* Compute content embedding */
+    content_embedding = DatumGetVector(DirectFunctionCall1(ai_embed, PointerGetDatum(content_text)));
+
+    /* Verify dimensions */
+    if (content_embedding->dim != MODEL_DIMS) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("content embedding dimension mismatch: expected %d, got %d",
+                        MODEL_DIMS, content_embedding->dim)));
+    }
+
+    /* Allocate array for scores */
+    scores = (CategoryScore*)palloc(num_categories * sizeof(CategoryScore));
+
+    /* Calculate similarity for each category */
+    for (i = 0; i < num_categories; i++) {
+        text* category_text;
+        char* category_str;
+        float* category_embedding;
+        float similarity;
+
+        /* Skip NULL categories */
+        if (category_nulls[i]) {
+            scores[i].index = i;
+            scores[i].similarity = -2.0f;  /* Lowest possible */
+            continue;
+        }
+
+        /* Get category string */
+        category_text = DatumGetTextPP(category_datums[i]);
+        category_str = text_to_cstring(category_text);
+
+        /* Skip empty categories */
+        if (strlen(category_str) == 0) {
+            scores[i].index = i;
+            scores[i].similarity = -2.0f;
+            continue;
+        }
+
+        /* Get category embedding from cache */
+        category_embedding = get_category_embedding(category_str);
+
+        /* Calculate cosine similarity */
+        similarity = cosine_similarity(content_embedding->x, category_embedding, MODEL_DIMS);
+
+        scores[i].index = i;
+        scores[i].similarity = similarity;
+
+        elog(DEBUG2, "ai.classify(threshold+top_k): category='%s' similarity=%.4f threshold=%.4f",
+             category_str, similarity, threshold);
+    }
+
+    /* Sort by similarity (descending) */
+    qsort(scores, num_categories, sizeof(CategoryScore), compare_category_scores);
+
+    /* Count how many meet threshold */
+    result_count = 0;
+    for (i = 0; i < num_categories && i < top_k; i++) {
+        if (scores[i].similarity >= threshold) {
+            result_count++;
+        }
+    }
+
+    elog(DEBUG1, "ai.classify(threshold+top_k): %d categories above threshold %.4f (top_k=%d)",
+         result_count, threshold, top_k);
+
+    /* Build result array with categories above threshold */
+    result_datums = (Datum*)palloc(result_count * sizeof(Datum));
+    for (i = 0; i < result_count; i++) {
+        int cat_index = scores[i].index;
+        result_datums[i] = category_datums[cat_index];
+
+        elog(DEBUG1, "ai.classify(threshold+top_k): rank %d: '%s' similarity=%.4f",
+             i + 1,
+             text_to_cstring(DatumGetTextPP(category_datums[cat_index])),
+             scores[i].similarity);
+    }
+
+    /* Construct result array (may be empty if none meet threshold) */
+    result_array = construct_array(result_datums, result_count, TEXTOID, -1, false, 'i');
+
+    PG_RETURN_ARRAYTYPE_P(result_array);
+}
+
