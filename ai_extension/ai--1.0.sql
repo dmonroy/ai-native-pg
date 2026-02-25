@@ -27,6 +27,15 @@ CREATE FUNCTION ai.classify_cache_stats()
   LANGUAGE C
   AS '$libdir/ai', 'ai_classify_cache_stats';
 
+-- Classification function (enum variant)
+-- Classifies content into PostgreSQL enum type using semantic similarity
+CREATE FUNCTION ai.classify(content text, categories anyelement) RETURNS anyelement
+  STABLE              -- Deterministic within transaction (enum type can be altered)
+  STRICT              -- Returns NULL for NULL content
+  PARALLEL SAFE       -- Can run in parallel workers
+  LANGUAGE C
+  AS '$libdir/ai', 'ai_classify_enum';
+
 -- Classification function (array variant)
 -- Classifies content into one of the provided categories using semantic similarity
 CREATE FUNCTION ai.classify(content text, categories text[]) RETURNS text
@@ -71,6 +80,7 @@ COMMENT ON SCHEMA ai IS 'AI-native primitives for PostgreSQL';
 COMMENT ON FUNCTION ai.embed(text) IS 'Generate embedding using nomic-embed-text-v1.5 (768-dim, MTEB 62.28)';
 COMMENT ON FUNCTION ai.health_check() IS 'Check if ONNX model is loaded and working';
 COMMENT ON FUNCTION ai.classify_cache_stats() IS 'Get category embedding cache statistics (hits, misses, entries, memory)';
+COMMENT ON FUNCTION ai.classify(text, anyelement) IS 'Classify content into PostgreSQL enum type using semantic similarity (type-safe classification)';
 COMMENT ON FUNCTION ai.classify(text, text[]) IS 'Classify content into one of the provided categories using semantic similarity';
 COMMENT ON FUNCTION ai.classify(text, text[], double precision) IS 'Classify content with minimum similarity threshold (0.0-1.0), returns NULL if below threshold';
 COMMENT ON FUNCTION ai.classify(text, text[], integer) IS 'Multi-label classification: returns top K most similar categories sorted by similarity';

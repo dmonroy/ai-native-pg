@@ -19,6 +19,12 @@
 #include "access/hash.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
+#include "utils/typcache.h"
+#include "utils/syscache.h"
+#include "catalog/pg_type.h"
+#include "catalog/pg_enum.h"
+#include "utils/lsyscache.h"
+#include "executor/spi.h"
 #include "extension/vector/vector.h"
 #include <onnxruntime_c_api.h>
 #include <string.h>
@@ -1074,6 +1080,183 @@ Datum ai_classify_cache_stats(PG_FUNCTION_ARGS) {
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * ai.classify(text, anyelement) - Enum variant
+ *
+ * Classify content into PostgreSQL enum type using semantic similarity
+ * Returns the enum value with highest cosine similarity to the content
+ *
+ * Algorithm:
+ * 1. Extract enum labels from the enum type
+ * 2. Compute embedding for content text (1× ai.embed call)
+ * 3. Get embeddings for each enum label (N× cache lookups, very fast)
+ * 4. Calculate cosine similarity between content and each label
+ * 5. Return enum value with highest similarity score
+ *
+ * Performance: ~5ms for first call + ~0.01ms per cached category
+ */
+PG_FUNCTION_INFO_V1(ai_classify_enum);
+Datum ai_classify_enum(PG_FUNCTION_ARGS) {
+    text* content_text;
+    Oid enum_type_oid;
+    TypeCacheEntry* type_cache;
+    char* content_str;
+    Vector* content_embedding;
+    int ret;
+    uint64 proc;
+    int num_values;
+    Oid best_enum_oid;
+    float best_similarity;
+    int i;
+    char query[256];
+
+    /* Handle NULL content - return NULL */
+    if (PG_ARGISNULL(0)) {
+        PG_RETURN_NULL();
+    }
+
+    /* Get the enum type OID from the second argument */
+    enum_type_oid = get_fn_expr_argtype(fcinfo->flinfo, 1);
+    if (enum_type_oid == InvalidOid) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("could not determine enum type")));
+    }
+
+    /* Verify it's actually an enum type */
+    type_cache = lookup_type_cache(enum_type_oid, 0);
+    if (type_cache->typtype != TYPTYPE_ENUM) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("second argument must be an enum type"),
+                 errhint("Use NULL::your_enum_type to specify the enum type")));
+    }
+
+    /* Get content text */
+    content_text = PG_GETARG_TEXT_PP(0);
+    content_str = text_to_cstring(content_text);
+
+    /* Validate content is not empty */
+    if (strlen(content_str) == 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("content text cannot be empty")));
+    }
+
+    /* Compute content embedding */
+    content_embedding = DatumGetVector(DirectFunctionCall1(ai_embed, PointerGetDatum(content_text)));
+
+    /* Verify dimensions */
+    if (content_embedding->dim != MODEL_DIMS) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("content embedding dimension mismatch: expected %d, got %d",
+                        MODEL_DIMS, content_embedding->dim)));
+    }
+
+    /* Connect to SPI */
+    if ((ret = SPI_connect()) < 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_SYSTEM_ERROR),
+                 errmsg("SPI_connect failed: error code %d", ret)));
+    }
+
+    /* Query pg_enum for all values of this enum type */
+    snprintf(query, sizeof(query),
+             "SELECT oid, enumlabel FROM pg_enum WHERE enumtypid = %u ORDER BY enumsortorder",
+             enum_type_oid);
+
+    ret = SPI_execute(query, true, 0);
+    if (ret != SPI_OK_SELECT) {
+        SPI_finish();
+        ereport(ERROR,
+                (errcode(ERRCODE_SYSTEM_ERROR),
+                 errmsg("failed to query pg_enum")));
+    }
+
+    proc = SPI_processed;
+    num_values = (int)proc;
+
+    /* Validate number of categories */
+    if (num_values < 2) {
+        SPI_finish();
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("enum must have at least 2 values for classification"),
+                 errhint("Current enum has %d value(s)", num_values)));
+    }
+
+    if (num_values > 1000) {
+        SPI_finish();
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("enum has too many values for classification"),
+                 errhint("Maximum 1000 values allowed, enum has %d", num_values)));
+    }
+
+    /* Find best matching enum value */
+    best_enum_oid = InvalidOid;
+    best_similarity = -1.0f;
+
+    for (i = 0; i < num_values; i++) {
+        HeapTuple tuple = SPI_tuptable->vals[i];
+        TupleDesc tupdesc = SPI_tuptable->tupdesc;
+        bool isnull;
+        Oid enum_oid;
+        Datum label_datum;
+        char* enum_label;
+        float* category_embedding;
+        float similarity;
+
+        /* Get OID */
+        enum_oid = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 1, &isnull));
+        if (isnull) continue;
+
+        /* Get label */
+        label_datum = SPI_getbinval(tuple, tupdesc, 2, &isnull);
+        if (isnull) continue;
+
+        enum_label = TextDatumGetCString(label_datum);
+
+        /* Skip empty labels */
+        if (enum_label == NULL || strlen(enum_label) == 0) {
+            elog(WARNING, "skipping empty enum label at index %d", i);
+            continue;
+        }
+
+        /* Get category embedding from cache */
+        category_embedding = get_category_embedding(enum_label);
+        if (category_embedding == NULL) {
+            SPI_finish();
+            ereport(ERROR,
+                    (errcode(ERRCODE_SYSTEM_ERROR),
+                     errmsg("failed to get embedding for enum label: %s", enum_label)));
+        }
+
+        /* Calculate cosine similarity */
+        similarity = cosine_similarity(content_embedding->x, category_embedding, MODEL_DIMS);
+
+        /* Update best match */
+        if (similarity > best_similarity) {
+            best_similarity = similarity;
+            best_enum_oid = enum_oid;
+        }
+    }
+
+    /* Disconnect from SPI */
+    SPI_finish();
+
+    /* Should always find at least one match */
+    if (best_enum_oid == InvalidOid) {
+        ereport(ERROR,
+                (errcode(ERRCODE_SYSTEM_ERROR),
+                 errmsg("no valid enum values for classification")));
+    }
+
+    /* Return the enum value as Datum */
+    PG_RETURN_DATUM(ObjectIdGetDatum(best_enum_oid));
 }
 
 /*
