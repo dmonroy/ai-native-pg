@@ -36,6 +36,14 @@ CREATE FUNCTION ai.classify(text, text[]) RETURNS text
   LANGUAGE C
   AS '$libdir/ai', 'ai_classify_array';
 
+-- Classification function with threshold
+-- Returns best category only if similarity >= threshold, NULL otherwise
+CREATE FUNCTION ai.classify(text, text[], double precision) RETURNS text
+  IMMUTABLE           -- Deterministic: same input always returns same output
+  PARALLEL SAFE       -- Can run in parallel workers
+  LANGUAGE C
+  AS '$libdir/ai', 'ai_classify_array_threshold';
+
 -- Version function
 CREATE FUNCTION ai.version() RETURNS text
   IMMUTABLE
@@ -47,3 +55,4 @@ COMMENT ON FUNCTION ai.embed(text) IS 'Generate embedding using nomic-embed-text
 COMMENT ON FUNCTION ai.health_check() IS 'Check if ONNX model is loaded and working';
 COMMENT ON FUNCTION ai.classify_cache_stats() IS 'Get category embedding cache statistics (hits, misses, entries, memory)';
 COMMENT ON FUNCTION ai.classify(text, text[]) IS 'Classify content into one of the provided categories using semantic similarity';
+COMMENT ON FUNCTION ai.classify(text, text[], double precision) IS 'Classify content with minimum similarity threshold (0.0-1.0), returns NULL if below threshold';

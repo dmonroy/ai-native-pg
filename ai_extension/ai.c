@@ -1213,3 +1213,167 @@ Datum ai_classify_array(PG_FUNCTION_ARGS) {
     PG_RETURN_TEXT_P(DatumGetTextPP(category_datums[best_index]));
 }
 
+/*
+ * ai.classify(text, text[], threshold)
+ *
+ * Classify content with minimum similarity threshold
+ * Returns the best matching category only if similarity >= threshold
+ * Returns NULL if no category meets the threshold
+ *
+ * Threshold range: 0.0 (accept any) to 1.0 (perfect match only)
+ * Typical thresholds:
+ *   0.3-0.5: Permissive (good for broad categories)
+ *   0.6-0.7: Balanced (most use cases)
+ *   0.8-0.9: Strict (high confidence only)
+ *
+ * Use cases:
+ * - Content moderation (high threshold = conservative filtering)
+ * - Auto-tagging (medium threshold = reasonable accuracy)
+ * - Fallback handling (check if NULL, provide default)
+ */
+PG_FUNCTION_INFO_V1(ai_classify_array_threshold);
+Datum ai_classify_array_threshold(PG_FUNCTION_ARGS) {
+    text* content_text;
+    ArrayType* categories_array;
+    float8 threshold;
+    char* content_str;
+    Vector* content_embedding;
+    int num_categories;
+    Datum* category_datums;
+    bool* category_nulls;
+    int best_index;
+    float best_similarity;
+    int i;
+
+    /* Handle NULL content - return NULL */
+    if (PG_ARGISNULL(0)) {
+        PG_RETURN_NULL();
+    }
+
+    /* Validate categories array */
+    if (PG_ARGISNULL(1)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("categories array cannot be NULL")));
+    }
+
+    /* Get threshold (default to 0.0 if NULL) */
+    if (PG_ARGISNULL(2)) {
+        threshold = 0.0;
+    } else {
+        threshold = PG_GETARG_FLOAT8(2);
+    }
+
+    /* Validate threshold range */
+    if (threshold < 0.0 || threshold > 1.0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("threshold must be between 0.0 and 1.0, got %.4f", threshold)));
+    }
+
+    /* Get content text */
+    content_text = PG_GETARG_TEXT_PP(0);
+    content_str = text_to_cstring(content_text);
+
+    /* Validate content is not empty */
+    if (strlen(content_str) == 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("content text cannot be empty")));
+    }
+
+    /* Get categories array */
+    categories_array = PG_GETARG_ARRAYTYPE_P(1);
+
+    /* Deconstruct array */
+    deconstruct_array(categories_array, TEXTOID, -1, false, 'i',
+                     &category_datums, &category_nulls, &num_categories);
+
+    /* Validate: at least 2 categories required */
+    if (num_categories < 2) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("at least 2 categories required, got %d", num_categories)));
+    }
+
+    /* Validate: no more than 1000 categories */
+    if (num_categories > 1000) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("too many categories: %d (maximum 1000)", num_categories)));
+    }
+
+    /* Compute content embedding */
+    content_embedding = DatumGetVector(DirectFunctionCall1(ai_embed, PointerGetDatum(content_text)));
+
+    /* Verify dimensions */
+    if (content_embedding->dim != MODEL_DIMS) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("content embedding dimension mismatch: expected %d, got %d",
+                        MODEL_DIMS, content_embedding->dim)));
+    }
+
+    /* Find best matching category */
+    best_index = -1;
+    best_similarity = -2.0f;  /* Start below minimum possible similarity (-1.0) */
+
+    for (i = 0; i < num_categories; i++) {
+        text* category_text;
+        char* category_str;
+        float* category_embedding;
+        float similarity;
+
+        /* Skip NULL categories */
+        if (category_nulls[i]) {
+            continue;
+        }
+
+        /* Get category string */
+        category_text = DatumGetTextPP(category_datums[i]);
+        category_str = text_to_cstring(category_text);
+
+        /* Validate category not empty */
+        if (strlen(category_str) == 0) {
+            ereport(WARNING,
+                    (errmsg("skipping empty category at index %d", i)));
+            continue;
+        }
+
+        /* Get category embedding from cache */
+        category_embedding = get_category_embedding(category_str);
+
+        /* Calculate cosine similarity */
+        similarity = cosine_similarity(content_embedding->x, category_embedding, MODEL_DIMS);
+
+        /* Track best match */
+        if (similarity > best_similarity) {
+            best_similarity = similarity;
+            best_index = i;
+        }
+
+        elog(DEBUG2, "ai.classify(threshold): category='%s' similarity=%.4f", category_str, similarity);
+    }
+
+    /* Ensure we found a valid category */
+    if (best_index < 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_EXCEPTION),
+                 errmsg("no valid categories found")));
+    }
+
+    elog(DEBUG1, "ai.classify(threshold): best='%s' similarity=%.4f threshold=%.4f",
+         text_to_cstring(DatumGetTextPP(category_datums[best_index])),
+         best_similarity, threshold);
+
+    /* Check if best match meets threshold */
+    if (best_similarity < threshold) {
+        elog(DEBUG1, "ai.classify(threshold): best similarity %.4f below threshold %.4f, returning NULL",
+             best_similarity, threshold);
+        PG_RETURN_NULL();
+    }
+
+    /* Return best matching category */
+    PG_RETURN_TEXT_P(DatumGetTextPP(category_datums[best_index]));
+}
+
