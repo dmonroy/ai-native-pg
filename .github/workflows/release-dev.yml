@@ -10,14 +10,10 @@ env:
 
 jobs:
   release-main:
-    name: PostgreSQL ${{ matrix.pg_version }}
+    name: Build and push all versions
     runs-on: ubuntu-latest
     permissions:
       packages: write
-
-    strategy:
-      matrix:
-        pg_version: [14, 15, 16, 17, 18]
 
     steps:
       - name: Checkout code
@@ -33,28 +29,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push multi-arch image
-        env:
-          IMAGE_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pg${{ matrix.pg_version }}-dev
+      - name: Build and push all PostgreSQL versions
         run: |
-          echo "📦 Building multi-arch for PostgreSQL ${{ matrix.pg_version }}..."
+          for PG_VERSION in 14 15 16 17 18; do
+            IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pg${PG_VERSION}-dev"
 
-          # Build tags
-          TAGS="-t ${{ env.IMAGE_TAG }}"
+            echo "📦 Building multi-arch for PostgreSQL ${PG_VERSION}..."
 
-          # Add 'dev' alias for latest PostgreSQL version (18)
-          if [ "${{ matrix.pg_version }}" = "18" ]; then
-            TAGS="$TAGS -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev"
-            echo "  Adding alias: dev"
-          fi
+            # Pull existing image for layer caching
+            docker pull ${IMAGE_TAG} || true
 
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --build-arg PG_MAJOR=${{ matrix.pg_version }} \
-            --cache-from type=registry,ref=${{ env.IMAGE_TAG }} \
-            --cache-to type=inline \
-            $TAGS \
-            --push \
-            .
+            # Build tags
+            TAGS="-t ${IMAGE_TAG}"
 
-          echo "✅ Pushed ${{ env.IMAGE_TAG }}"
+            # Add 'dev' alias for latest PostgreSQL version (18)
+            if [ "${PG_VERSION}" = "18" ]; then
+              TAGS="${TAGS} -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev"
+              echo "  Adding alias: dev"
+            fi
+
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg PG_MAJOR=${PG_VERSION} \
+              --cache-from type=registry,ref=${IMAGE_TAG} \
+              --cache-to type=inline \
+              ${TAGS} \
+              --push \
+              .
+
+            echo "✅ Pushed ${IMAGE_TAG}"
+          done
