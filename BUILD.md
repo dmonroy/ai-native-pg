@@ -13,7 +13,7 @@ All version numbers in the Dockerfile are configurable via build arguments.
 ## Building with Default Values
 
 ```bash
-docker build -t ai-postgres:latest .
+docker build -t ai-native-pg:latest .
 ```
 
 ## Building with Custom Versions
@@ -23,7 +23,7 @@ docker build -t ai-postgres:latest .
 ```bash
 docker build \
   --build-arg PG_MAJOR=16 \
-  -t ai-postgres:pg16 \
+  -t ai-native-pg:pg16 \
   .
 ```
 
@@ -32,7 +32,7 @@ docker build \
 ```bash
 docker build \
   --build-arg ONNX_VERSION=1.25.0 \
-  -t ai-postgres:onnx-1.25 \
+  -t ai-native-pg:onnx-1.25 \
   .
 ```
 
@@ -41,7 +41,7 @@ docker build \
 ```bash
 docker build \
   --build-arg EXTENSION_VERSION=2.0 \
-  -t ai-postgres:v2 \
+  -t ai-native-pg:v2 \
   .
 ```
 
@@ -52,7 +52,7 @@ docker build \
   --build-arg PG_MAJOR=17 \
   --build-arg ONNX_VERSION=1.25.0 \
   --build-arg EXTENSION_VERSION=2.0 \
-  -t ai-postgres:custom \
+  -t ai-native-pg:custom \
   .
 ```
 
@@ -86,7 +86,7 @@ services:
     docker build \
       --build-arg PG_MAJOR=${{ matrix.pg_version }} \
       --build-arg ONNX_VERSION=${{ env.ONNX_VERSION }} \
-      -t ai-postgres:pg${{ matrix.pg_version }} \
+      -t ai-native-pg:pg${{ matrix.pg_version }} \
       .
   env:
     ONNX_VERSION: 1.24.2
@@ -100,7 +100,7 @@ build:
     - docker build
       --build-arg PG_MAJOR=${PG_MAJOR}
       --build-arg ONNX_VERSION=${ONNX_VERSION}
-      -t ai-postgres:${CI_COMMIT_TAG}
+      -t ai-native-pg:${CI_COMMIT_TAG}
       .
   variables:
     PG_MAJOR: "16"
@@ -162,7 +162,7 @@ ERROR 404: Not Found
 
 ```bash
 # Use defaults, leverages Docker cache
-docker build -t ai-postgres:dev .
+docker build -t ai-native-pg:dev .
 ```
 
 ### Production Build (Secure)
@@ -173,7 +173,7 @@ docker build --no-cache \
   --build-arg PG_MAJOR=18 \
   --build-arg ONNX_VERSION=1.24.2 \
   --build-arg EXTENSION_VERSION=1.0 \
-  -t ai-postgres:prod \
+  -t ai-native-pg:prod \
   .
 ```
 
@@ -183,8 +183,8 @@ docker build --no-cache \
 # Test with PostgreSQL 16 (stable)
 docker build \
   --build-arg PG_MAJOR=16 \
-  -t ai-postgres:pg16-test \
+  -t ai-native-pg:pg16-test \
   . && \
-docker run --rm -e POSTGRES_PASSWORD=test ai-postgres:pg16-test \
+docker run --rm -e POSTGRES_PASSWORD=test ai-native-pg:pg16-test \
   psql -U postgres -c "SELECT version();"
 ```

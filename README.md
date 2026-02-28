@@ -43,7 +43,7 @@ All images include:
 docker pull ghcr.io/dmonroy/ai-native-pg:dev
 
 docker run -d \
-  --name ai-postgres \
+  --name ai-native-pg \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
   ghcr.io/dmonroy/ai-native-pg:dev
@@ -87,7 +87,7 @@ Pre-built images are recommended, but you can build locally:
 docker build \
   --build-arg PG_MAJOR=18 \
   --build-arg ONNX_VERSION=1.24.2 \
-  -t ai-postgres:latest .
+  -t ai-native-pg:latest .
 ```
 
 All versions are parameterized as Docker build arguments (see BUILD.md).

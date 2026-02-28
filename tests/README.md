@@ -30,18 +30,18 @@ CONTAINER_NAME=my-postgres ./tests/run_tests.sh
 
 ```bash
 # Run a specific test
-docker exec ai-postgres-test psql -U postgres -f - < tests/sql/03_basic_embedding.sql
+docker exec ai-native-pg-test psql -U postgres -f - < tests/sql/03_basic_embedding.sql
 
 # Or copy into container and run
-docker cp tests/sql/03_basic_embedding.sql ai-postgres-test:/tmp/
-docker exec ai-postgres-test psql -U postgres -f /tmp/03_basic_embedding.sql
+docker cp tests/sql/03_basic_embedding.sql ai-native-pg-test:/tmp/
+docker exec ai-native-pg-test psql -U postgres -f /tmp/03_basic_embedding.sql
 ```
 
 ### Manual Testing
 
 ```bash
 # Connect to container
-docker exec -it ai-postgres-test psql -U postgres
+docker exec -it ai-native-pg-test psql -U postgres
 
 # Paste test content or run:
 \i /path/to/test.sql
@@ -143,13 +143,13 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Build Docker image
-        run: docker build -t ai-postgres:test .
+        run: docker build -t ai-native-pg:test .
 
       - name: Start PostgreSQL
         run: |
-          docker run -d --name ai-postgres-test \
+          docker run -d --name ai-native-pg-test \
             -e POSTGRES_PASSWORD=postgres \
-            ai-postgres:test
+            ai-native-pg:test
           sleep 5
 
       - name: Run test suite
@@ -157,7 +157,7 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: docker rm -f ai-postgres-test
+        run: docker rm -f ai-native-pg-test
 ```
 
 ### GitLab CI
@@ -168,12 +168,12 @@ test:
   services:
     - docker:dind
   script:
-    - docker build -t ai-postgres:test .
-    - docker run -d --name ai-postgres-test -e POSTGRES_PASSWORD=postgres ai-postgres:test
+    - docker build -t ai-native-pg:test .
+    - docker run -d --name ai-native-pg-test -e POSTGRES_PASSWORD=postgres ai-native-pg:test
     - sleep 5
     - ./tests/run_tests.sh
   after_script:
-    - docker rm -f ai-postgres-test
+    - docker rm -f ai-native-pg-test
 ```
 
 ## Adding New Tests
@@ -216,24 +216,24 @@ END $$;
 
 ```bash
 # Show all SQL output
-docker exec ai-postgres-test psql -U postgres -a -f - < tests/sql/03_basic_embedding.sql
+docker exec ai-native-pg-test psql -U postgres -a -f - < tests/sql/03_basic_embedding.sql
 ```
 
 ### Check PostgreSQL logs
 
 ```bash
 # View container logs
-docker logs ai-postgres-test
+docker logs ai-native-pg-test
 
 # Follow logs in real-time
-docker logs -f ai-postgres-test
+docker logs -f ai-native-pg-test
 ```
 
 ### Interactive debugging
 
 ```bash
 # Connect and run commands manually
-docker exec -it ai-postgres-test psql -U postgres
+docker exec -it ai-native-pg-test psql -U postgres
 
 # Check extension status
 SELECT * FROM pg_extension WHERE extname = 'ai';

@@ -12,7 +12,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-CONTAINER_NAME="${CONTAINER_NAME:-ai-postgres-test}"
+CONTAINER_NAME="${CONTAINER_NAME:-ai-native-pg-test}"
 DB_USER="${DB_USER:-postgres}"
 DB_NAME="${DB_NAME:-postgres}"
 TEST_DIR="$(dirname "$0")/sql"
@@ -20,7 +20,7 @@ TEST_DIR="$(dirname "$0")/sql"
 # Check if container is running
 if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo -e "${RED}Error: Container '${CONTAINER_NAME}' is not running${NC}"
-    echo "Start it with: docker run -d --name ${CONTAINER_NAME} -e POSTGRES_PASSWORD=postgres ai-postgres:latest"
+    echo "Start it with: docker run -d --name ${CONTAINER_NAME} -e POSTGRES_PASSWORD=postgres ai-native-pg:latest"
     exit 1
 fi
 

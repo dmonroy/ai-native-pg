@@ -16,8 +16,8 @@ echo -e "${GREEN}================================${NC}"
 echo ""
 
 # Configuration
-IMAGE_NAME="${IMAGE_NAME:-ai-postgres:test}"
-CONTAINER_NAME="ai-postgres-test"
+IMAGE_NAME="${IMAGE_NAME:-ai-native-pg:test}"
+CONTAINER_NAME="ai-native-pg-test"
 TEST_USER="postgres"
 TEST_PASSWORD="postgres"
 TEST_PORT="5434"
