@@ -73,7 +73,7 @@ docker build \
 ## Directory Structure
 
 ```
-ai-native-pg-c/
+ai-native-pg/               # Repository root
 ├── Dockerfile              # Container definition
 ├── BUILD.md               # Build configuration docs
 ├── README.md              # This file
