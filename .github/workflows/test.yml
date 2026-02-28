@@ -1,0 +1,49 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: PostgreSQL ${{ matrix.pg_version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [14, 15, 16, 17, 18]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and test
+        run: |
+          docker build \
+            --build-arg PG_MAJOR=${{ matrix.pg_version }} \
+            -t ai-postgres:pg${{ matrix.pg_version }} \
+            .
+
+          docker run --rm \
+            ai-postgres:pg${{ matrix.pg_version }} \
+            bash -c "
+              service postgresql start && \
+              su - postgres -c 'psql -c \"CREATE EXTENSION ai;\"' && \
+              su - postgres -c 'psql -c \"SELECT ai.health_check();\"' && \
+              su - postgres -c 'cd /ai-extension/tests && ./run_tests.sh'
+            "
+
+      - name: Test embedding generation
+        run: |
+          docker run --rm \
+            ai-postgres:pg${{ matrix.pg_version }} \
+            bash -c "
+              service postgresql start && \
+              su - postgres -c '
+                psql -c \"CREATE EXTENSION ai;\" && \
+                psql -c \"SELECT vector_dims(ai.embed(\\\"test\\\"));\"
+              '
+            "
