@@ -14,23 +14,39 @@
 7. ✅ Category embedding cache (10-100× speedup for classification)
 8. ✅ Comprehensive test suite (20 SQL tests + 7 C unit tests)
 
+## Docker Images
+
+Pre-built multi-architecture images (linux/amd64, linux/arm64) are available on GitHub Container Registry:
+
+```bash
+# Latest PostgreSQL (18)
+docker pull ghcr.io/dmonroy/ai-native-pg:dev
+
+# Specific PostgreSQL versions
+docker pull ghcr.io/dmonroy/ai-native-pg:pg18-dev
+docker pull ghcr.io/dmonroy/ai-native-pg:pg17-dev
+docker pull ghcr.io/dmonroy/ai-native-pg:pg16-dev
+docker pull ghcr.io/dmonroy/ai-native-pg:pg15-dev
+docker pull ghcr.io/dmonroy/ai-native-pg:pg14-dev
+```
+
+All images include:
+- PostgreSQL (versions 14-18)
+- pgvector extension
+- ONNX Runtime 1.24.2
+- ai extension with nomic-embed-text-v1.5 model
+
 ## Quick Start
 
 ```bash
-# Build and test (runs full test suite)
-./build-and-test.sh
+# Pull and run the latest version (PostgreSQL 18)
+docker pull ghcr.io/dmonroy/ai-native-pg:dev
 
-# Or manually:
-
-# Build image
-docker build -t ai-postgres:latest .
-
-# Run container
 docker run -d \
   --name ai-postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
-  ai-postgres:latest
+  ghcr.io/dmonroy/ai-native-pg:dev
 
 # Connect
 psql -h localhost -U postgres
@@ -59,16 +75,22 @@ PostgreSQL 18
    └─ Model: nomic-embed-text-v1.5 (768-dim, ~64MB, MTEB 62.28)
 ```
 
-## Build Configuration
+## Building from Source
 
-All versions are parameterized as Docker build arguments (see BUILD.md):
+Pre-built images are recommended, but you can build locally:
 
 ```bash
+# Build and test (runs full test suite)
+./build-and-test.sh
+
+# Or build manually with specific versions
 docker build \
   --build-arg PG_MAJOR=18 \
   --build-arg ONNX_VERSION=1.24.2 \
   -t ai-postgres:latest .
 ```
+
+All versions are parameterized as Docker build arguments (see BUILD.md).
 
 ## Directory Structure
 
