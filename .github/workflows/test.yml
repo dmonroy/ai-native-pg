@@ -21,29 +21,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build and test
+        env:
+          IMAGE_NAME: ai-postgres:pg${{ matrix.pg_version }}
         run: |
           docker build \
             --build-arg PG_MAJOR=${{ matrix.pg_version }} \
-            -t ai-postgres:pg${{ matrix.pg_version }} \
+            -t $IMAGE_NAME \
             .
 
-          docker run --rm \
-            ai-postgres:pg${{ matrix.pg_version }} \
-            bash -c "
-              service postgresql start && \
-              su - postgres -c 'psql -c \"CREATE EXTENSION ai;\"' && \
-              su - postgres -c 'psql -c \"SELECT ai.health_check();\"' && \
-              su - postgres -c 'cd /ai-extension/tests && ./run_tests.sh'
-            "
-
-      - name: Test embedding generation
-        run: |
-          docker run --rm \
-            ai-postgres:pg${{ matrix.pg_version }} \
-            bash -c "
-              service postgresql start && \
-              su - postgres -c '
-                psql -c \"CREATE EXTENSION ai;\" && \
-                psql -c \"SELECT vector_dims(ai.embed(\\\"test\\\"));\"
-              '
-            "
+          # Use the build-and-test.sh script which handles everything
+          IMAGE_NAME=$IMAGE_NAME ./build-and-test.sh
