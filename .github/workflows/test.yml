@@ -22,7 +22,7 @@ jobs:
 
       - name: Build and test
         env:
-          IMAGE_NAME: ai-postgres:pg${{ matrix.pg_version }}
+          IMAGE_NAME: ${{ github.repository }}:pg${{ matrix.pg_version }}
         run: |
           docker build \
             --build-arg PG_MAJOR=${{ matrix.pg_version }} \
