@@ -1,0 +1,33 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: PostgreSQL ${{ matrix.pg_version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [14, 15, 16, 17, 18]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build and test
+        env:
+          IMAGE_NAME: ${{ github.repository }}:pg${{ matrix.pg_version }}
+        run: |
+          docker build \
+            --build-arg PG_MAJOR=${{ matrix.pg_version }} \
+            -t $IMAGE_NAME \
+            .
+
+          # Use the build-and-test.sh script which handles everything
+          IMAGE_NAME=$IMAGE_NAME ./build-and-test.sh
