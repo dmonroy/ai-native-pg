@@ -1,5 +1,11 @@
 # AI-Native Postgres - C Extension
 
+PostgreSQL extension that brings AI-native capabilities directly into the database through IMMUTABLE `ai.embed()` and `ai.classify()` functions. Uses local ONNX Runtime for inference—no external API calls, zero cost, full privacy. Enables generated columns with AI operations for schema-level semantic understanding.
+
+For the full story on architectural decisions, supervised AI development, and production-validated performance (92 docs/sec, 10.9ms latency, 117 MiB/backend), read: [How and Why a Supervised AI Coded an AI-Native Postgres Extension](https://insert.dev/immutable-ai-functions-in-postgres/)
+
+---
+
 **Status:** Experimental Implementation
 **Goal:** Provide IMMUTABLE embedding and classification functions with generated columns support
 
